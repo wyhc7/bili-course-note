@@ -1,0 +1,21 @@
+services:
+  bili-note:
+    build: .
+    container_name: bili-note
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    volumes:
+      # 数据持久化：笔记输出、模型缓存都在这里
+      - ./data:/app/data
+      - ./logs:/app/logs
+      # Whisper 模型缓存（下载一次后复用，避免重启重下）
+      - whisper-cache:/root/.cache/huggingface
+    # 2核4G 限制：给容器内存封顶，避免单个任务把整机拖垮
+    mem_limit: 3600m
+    cpus: "2.0"
+
+volumes:
+  whisper-cache:

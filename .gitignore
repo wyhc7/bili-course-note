@@ -1,0 +1,20 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# 环境与数据
+.env
+data/
+uploads/
+logs/
+tools/
+*.db
+
+# 本地参考（第三方源码副本，不入库）
+reference/
+
+# 系统
+.DS_Store
+Thumbs.db

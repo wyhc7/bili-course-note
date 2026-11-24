@@ -1,0 +1,524 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>B站视频内容提取 · 网课笔记生成</title>
+<style>
+  :root{
+    --bg:#0f1115; --panel:#171a21; --border:#262b36; --fg:#e6e9ef;
+    --muted:#8b93a3; --accent:#4f8cff; --ok:#37c98b; --warn:#e8b04b; --err:#ef5f6b;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;font-family:-apple-system,"Segoe UI","Microsoft YaHei",sans-serif;
+       background:var(--bg);color:var(--fg);line-height:1.55}
+  header{padding:22px 20px 10px;max-width:960px;margin:0 auto}
+  h1{margin:0 0 4px;font-size:22px}
+  .sub{color:var(--muted);font-size:13px}
+  main{max-width:960px;margin:0 auto;padding:12px 20px 60px}
+  .card{background:var(--panel);border:1px solid var(--border);border-radius:12px;padding:16px;margin:14px 0}
+  .row{display:flex;gap:10px}
+  input[type=text]{flex:1;padding:12px 14px;border-radius:9px;border:1px solid var(--border);
+    background:#0d0f13;color:var(--fg);font-size:14px;outline:none}
+  input[type=text]:focus{border-color:var(--accent)}
+  button{padding:12px 20px;border:none;border-radius:9px;background:var(--accent);color:#fff;
+    font-size:14px;cursor:pointer;font-weight:600;white-space:nowrap}
+  button:disabled{opacity:.5;cursor:not-allowed}
+  .task{display:flex;align-items:center;gap:12px;padding:12px 0;border-bottom:1px solid var(--border)}
+  .task:last-child{border-bottom:none}
+  .task .info{flex:1;min-width:0}
+  .task .title{font-size:14px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .task .meta{font-size:12px;color:var(--muted);margin-top:2px}
+  .badge{font-size:11px;padding:2px 8px;border-radius:20px;font-weight:600}
+  .b-queued{background:#2a2f3a;color:var(--muted)}
+  .b-run{background:#243447;color:var(--accent)}
+  .b-done{background:#16342a;color:var(--ok)}
+  .b-fail{background:#3a1f24;color:var(--err)}
+  .bar{height:5px;background:#0d0f13;border-radius:3px;overflow:hidden;margin-top:8px}
+  .bar>i{display:block;height:100%;background:var(--accent);transition:width .4s}
+  .actions{display:flex;gap:8px;align-items:center}
+  .link{color:var(--accent);text-decoration:none;font-size:13px;cursor:pointer}
+  .link.danger{color:#e2554b}
+  .toolbar{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:10px}
+  .toolbar input[type=text]{flex:1;min-width:140px;padding:6px 10px;border:1px solid var(--line,#ddd);border-radius:6px;font-size:13px}
+  .toolbar select{padding:6px 8px;border:1px solid var(--line,#ddd);border-radius:6px;font-size:13px}
+  .task .chk{margin-right:6px;vertical-align:middle}
+  .msg{font-size:13px;margin-top:6px;color:var(--muted);min-height:18px}
+  .opts{display:flex;flex-wrap:wrap;gap:14px;margin-top:12px;align-items:center}
+  .opt{font-size:13px;color:var(--muted);display:flex;align-items:center;gap:6px;cursor:pointer;user-select:none}
+  .opt select{background:#0d0f13;color:var(--fg);border:1px solid var(--border);border-radius:7px;padding:6px 8px;font-size:13px;outline:none}
+  .opt input[type=checkbox]{accent-color:var(--accent);width:15px;height:15px}
+  .parts-panel{margin-top:14px;border:1px solid var(--border);border-radius:10px;padding:12px 14px;background:#12151b}
+  .parts-head{display:flex;align-items:center;gap:14px;margin-bottom:4px}
+  .parts-head strong{font-size:14px}
+  .parts-note{font-size:12px;color:var(--muted);margin-bottom:10px}
+  .parts-list{max-height:260px;overflow:auto;display:flex;flex-direction:column;gap:2px;margin-bottom:12px}
+  .part-row{display:flex;align-items:center;gap:8px;padding:6px 8px;border-radius:6px;font-size:13px;cursor:pointer}
+  .part-row:hover{background:#1a1e26}
+  .part-row input{accent-color:var(--accent);width:15px;height:15px}
+  .part-row .pno{color:var(--accent);font-weight:600;min-width:38px}
+  .part-row .pdur{color:var(--muted);font-size:12px;margin-left:auto}
+  .rows{display:flex;align-items:center;justify-content:space-between;gap:10px}
+  .msg.err{color:var(--err)}
+  /* 笔记预览面板 */
+  .modal{position:fixed;inset:0;background:rgba(0,0,0,.7);display:none;align-items:center;
+    justify-content:center;padding:20px;z-index:10}
+  .modal.show{display:flex}
+  .modal .inner{background:var(--panel);border:1px solid var(--border);border-radius:12px;
+    max-width:860px;width:100%;max-height:88vh;display:flex;flex-direction:column}
+  .modal .head{padding:14px 18px;border-bottom:1px solid var(--border);display:flex;
+    justify-content:space-between;align-items:center}
+  .modal pre{overflow:auto;padding:18px;margin:0;font-size:13px;white-space:pre-wrap;word-break:break-word;
+    font-family:ui-monospace,"Cascadia Code",Consolas,monospace;color:#cfd6e4}
+  .close{cursor:pointer;color:var(--muted);font-size:20px;border:none;background:none}
+  #modalBody{overflow:auto;padding:20px 22px;font-size:14px;line-height:1.7;color:#d8dee9}
+  #modalBody h1{font-size:20px;margin:8px 0 12px}
+  #modalBody h2{font-size:17px;margin:20px 0 10px;padding-bottom:4px;border-bottom:1px solid var(--border)}
+  #modalBody h3{font-size:15px;margin:16px 0 8px;color:#c7d2e5}
+  #modalBody h4,#modalBody h5,#modalBody h6{font-size:14px;margin:12px 0 6px}
+  #modalBody img.shot{display:block;max-width:100%;margin:10px 0;border-radius:8px;border:1px solid var(--border)}
+  #modalBody em{display:block;color:var(--muted);font-size:12.5px;text-align:center;margin:-4px 0 14px}
+  #modalBody a.md-link{color:var(--accent);text-decoration:none;cursor:pointer}
+  #modalBody a.md-link:hover{text-decoration:underline}
+  #modalBody .quote{display:block;color:var(--muted);border-left:3px solid var(--border);padding-left:10px;margin:4px 0}
+  #modalBody code{background:#0d0f13;padding:1px 5px;border-radius:4px;font-size:12px}
+  #modalBody pre.code{background:#0d0f13;padding:12px;border-radius:8px;font-size:12px;overflow:auto}
+  #modalBody table.md-table{border-collapse:collapse;width:100%;margin:12px 0;font-size:13px}
+  #modalBody table.md-table th,#modalBody table.md-table td{border:1px solid var(--border);padding:7px 10px;text-align:left}
+  #modalBody table.md-table th{background:#1d2129;font-weight:600}
+  #modalBody table.md-table tr:nth-child(even) td{background:#141821}
+  #modalBody .ts-badge{display:inline-block;background:#1f2c44;color:#7fb0ff;font-size:11px;font-weight:600;
+    padding:1px 7px;border-radius:5px;margin-left:6px;vertical-align:middle;font-family:ui-monospace,Consolas,monospace}
+  .hint{font-size:12px;color:var(--muted);margin-top:10px}
+</style>
+</head>
+<body>
+<header>
+  <h1>🎬 B站视频内容提取</h1>
+  <div class="sub">粘贴 B 站链接 → 后台排队转写 → 自动生成网课式 Markdown 笔记（本地 Whisper · 2核4G 友好）
+    <a class="link" href="/api/health" target="_blank" style="margin-left:8px;font-size:12px">🩺体检</a></div>
+</header>
+<main>
+  <div class="card">
+    <div class="row">
+      <input type="text" id="url" placeholder="粘贴 B站链接：https://b23.tv/xxxx 或 https://www.bilibili.com/video/BVxxxx">
+      <button id="submit">提交解析</button>
+    </div>
+    <div class="opts">
+      <label class="opt">风格
+        <select id="style">
+          <option value="网课" selected>网课</option>
+          <option value="精简">精简</option>
+          <option value="详细">详细</option>
+          <option value="教程">教程</option>
+          <option value="学术">学术</option>
+          <option value="小红书">小红书</option>
+          <option value="生活向">生活向</option>
+          <option value="任务导向">任务导向</option>
+          <option value="商业">商业</option>
+          <option value="会议纪要">会议纪要</option>
+        </select>
+      </label>
+      <label class="opt" title="base 快而省（默认）；small 更准但更慢更吃内存">转写模型
+        <select id="whisperModel">
+          <option value="">默认(base)</option>
+          <option value="base">base</option>
+          <option value="small">small(更准)</option>
+        </select>
+      </label>
+      <label class="opt"><input type="checkbox" id="screenshot" checked> 原片截图</label>
+      <label class="opt"><input type="checkbox" id="link" checked> 章节时间戳</label>
+      <label class="opt"><input type="checkbox" id="summary" checked> AI总结</label>
+      <label class="opt"><input type="checkbox" id="toc"> 目录</label>
+    </div>
+    <div class="msg" id="msg"></div>
+    <div class="hint">长视频（>1小时）在 2核4G 上转写较慢，可放着后台跑；一个任务跑完才会跑下一个。</div>
+    <!-- 多P分集选择面板（默认隐藏，检测到多P时出现） -->
+    <div id="partsPanel" class="parts-panel" style="display:none">
+      <div class="parts-head">
+        <strong id="partsTitle">检测到多P视频</strong>
+        <span class="link" id="partsSelectAll">全选</span>
+        <span class="link" id="partsSelectNone">全不选</span>
+      </div>
+      <div class="parts-note">选好要提取的分P，点下方“提交选中分集”。每集生成一篇独立笔记 + 总览页。</div>
+      <div id="partsList" class="parts-list"></div>
+      <div class="rows">
+        <label class="opt"><input type="checkbox" id="asCollection" checked> 按合集处理（生成总览页）</label>
+        <button id="submitParts" style="width:auto">提交选中分集</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="card">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+      <strong style="font-size:14px">任务列表</strong>
+      <span class="link" id="refresh">刷新</span>
+    </div>
+    <div class="toolbar">
+      <input type="text" id="search" placeholder="🔍 搜索标题/链接…" />
+      <select id="statusFilter">
+        <option value="">全部状态</option>
+        <option value="done">已完成</option>
+        <option value="failed">失败</option>
+        <option value="running">处理中</option>
+      </select>
+      <label class="opt"><input type="checkbox" id="selAll"> 全选</label>
+      <span class="link danger" id="batchDel" style="display:none">删除所选</span>
+      <span class="link" id="batchRerun" style="display:none">重跑所选</span>
+    </div>
+    <div id="tasks"><div class="meta">暂无任务</div></div>
+  </div>
+</main>
+
+<div class="modal" id="modal">
+  <div class="inner">
+    <div class="head">
+      <strong id="modalTitle">笔记预览</strong>
+      <div class="actions">
+        <a class="link" id="modalPhone" href="#" target="_blank" title="手机浏览器直接看（带图，无需解压）">📱手机看</a>
+        <a class="link" id="modalDownload" href="#" download>下载(含图 zip)</a>
+        <button class="close" id="modalClose">×</button>
+      </div>
+    </div>
+    <div id="modalBody"></div>
+  </div>
+</div>
+
+<script>
+const $ = s => document.querySelector(s);
+const STATUS = {
+  queued:['排队中','b-queued'], downloading:['下载中','b-run'],
+  transcribing:['转写中','b-run'], extracting:['抽帧/视觉','b-run'],
+  summarizing:['生成笔记','b-run'], done:['完成','b-done'], failed:['失败','b-fail'],
+};
+let timer = null;
+
+let currentParts = null;
+
+async function submit(){
+  const url = $('#url').value.trim();
+  if(!url){ setMsg('请先粘贴链接','err'); return; }
+  $('#submit').disabled = true; setMsg('检测分P中…');
+  try{
+    // 先探测是否多P
+    const pr = await fetch('/api/parts',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({url})});
+    const pd = await pr.json();
+    if(pr.ok && pd.total > 1){
+      showParts(pd);
+      setMsg('这是多P视频（共 '+pd.total+' P），请在下方选择要提取的分集');
+      return;
+    }
+    // 单P：直接提交
+    await submitSingle(url);
+  }catch(e){ setMsg(e.message,'err'); }
+  finally{ $('#submit').disabled=false; }
+}
+
+function showParts(info){
+  currentParts = info;
+  $('#partsTitle').textContent = '《'+info.title+'》共 '+info.total+' P — 选择要提取的分集';
+  const list = $('#partsList');
+  list.innerHTML = info.pages.map(p=>{
+    const m = Math.floor(p.duration/60), sec = Math.round(p.duration%60);
+    return `<label class="part-row"><input type="checkbox" data-page="${p.page}" checked>
+      <span class="pno">P${p.page}</span><span>${escapeHtml(p.part||('第'+p.page+'P'))}</span>
+      <span class="pdur">${m}分${sec}秒</span></label>`;
+  }).join('');
+  $('#partsPanel').style.display='block';
+}
+
+async function submitSingle(url){
+  const r = await fetch('/api/tasks',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({
+    url,
+    style: $('#style').value, screenshot: $('#screenshot').checked,
+    link: $('#link').checked, toc: $('#toc').checked, summary: $('#summary').checked,
+    whisper_model: ($('#whisperModel')||{}).value || '',
+  })});
+  const d = await r.json();
+  if(!r.ok){ throw new Error(d.detail || '提交失败'); }
+  $('#url').value=''; $('#partsPanel').style.display='none';
+  setMsg('已加入队列，任务 #'+d.id+'，后台会自动处理');
+  load();
+}
+
+async function submitParts(){
+  if(!currentParts){ return; }
+  const checked = [...document.querySelectorAll('#partsList input:checked')].map(i=>parseInt(i.dataset.page));
+  if(!checked.length){ setMsg('请至少选择一个分P','err'); return; }
+  $('#submitParts').disabled = true;
+  setMsg('提交中…');
+  try{
+    const url = $('#url').value.trim();
+    const r = await fetch('/api/collection',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({
+      url, parts: checked,
+      style: $('#style').value, screenshot: $('#screenshot').checked,
+      link: $('#link').checked, toc: $('#toc').checked, summary: $('#summary').checked,
+      whisper_model: ($('#whisperModel')||{}).value || '',
+    })});
+    const d = await r.json();
+    if(!r.ok){ throw new Error(d.detail || '提交失败'); }
+    $('#url').value=''; $('#partsPanel').style.display='none'; currentParts=null;
+    setMsg('已按合集提交 '+d.total+' 集，后台将逐个处理');
+    load();
+  }catch(e){ setMsg(e.message,'err'); }
+  finally{ $('#submitParts').disabled=false; }
+}
+
+function setMsg(t, cls){ const m=$('#msg'); m.textContent=t; m.className='msg'+(cls?(' '+cls):''); }
+
+async function load(){
+  try{
+    const r = await fetch('/api/tasks'); let list = await r.json();
+    const box = $('#tasks');
+    if(!list.length){ box.innerHTML='<div class="meta">暂无任务</div>'; syncBatchBar(); return; }
+
+    // 搜索 + 状态筛选
+    const kw = ($('#search')?.value||'').trim().toLowerCase();
+    const sf = $('#statusFilter')?.value||'';
+    const RUN = ['queued','downloading','transcribing','extracting','summarizing'];
+    list = list.filter(t=>{
+      if(kw){
+        const hay = ((t.title||'')+' '+(t.url||'')+' #'+t.id).toLowerCase();
+        if(!hay.includes(kw)) return false;
+      }
+      if(sf==='done' && t.status!=='done') return false;
+      if(sf==='failed' && t.status!=='failed') return false;
+      if(sf==='running' && !RUN.includes(t.status)) return false;
+      return true;
+    });
+    if(!list.length){ box.innerHTML='<div class="meta">没有匹配的任务</div>'; syncBatchBar(); return; }
+
+    // 按 collection_id 分组；非合集单任务单独显示
+    const groups = {};
+    const singles = [];
+    list.forEach(t=>{
+      if(t.collection_id){ (groups[t.collection_id]=groups[t.collection_id]||[]).push(t); }
+      else singles.push(t);
+    });
+
+    // 合集卡片：每个 collection 一行汇总
+    let collectionHtml = Object.entries(groups).map(([cid, arr])=>{
+      arr.sort((a,b)=>(a.part_index||0)-(b.part_index||0));
+      const done = arr.filter(t=>t.status==='done').length;
+      const failed = arr.filter(t=>t.status==='failed').length;
+      const running = arr.find(t=>['downloading','transcribing','extracting','summarizing'].includes(t.status));
+      const anyTitle = arr.map(t=>t.title).find(x=>x && x.trim());
+      const baseTitle = (anyTitle||'').split(' · ')[0] || '多P合集（处理中）';
+      const pct = Math.round(done/arr.length*100);
+      const badge = done===arr.length ? '<span class="badge b-done">全部完成</span>'
+        : (failed===arr.length ? '<span class="badge b-fail">全部失败</span>' : '<span class="badge b-run">处理中</span>');
+      const viewLink = done>0 ? `<a class="link" data-coll="${cid}">总览</a> <a class="link" href="/api/collections/${cid}/html?inline=1" target="_blank" title="手机浏览器直接看总览（可点进各讲）">📱手机看</a> <a class="link" href="/api/collections/${cid}/bundle" download>下载(含图 zip)</a>` : '';
+      const activeHref = done>0 ? `<a class="link" href="#" data-coll="${cid}">总览</a>` : '';
+      const curMsg = running ? `正处理 P${running.part_index}（${running.stage_message||''}）` : '';
+      return `<div class="task coll-task">
+        <div class="info">
+          <div class="title">📚 ${escapeHtml(baseTitle)}　<span class="meta">共 ${arr.length} 集</span></div>
+          <div class="meta">已完成 ${done}/${arr.length}${failed?`，失败 ${failed}`:''}${curMsg?'　'+escapeHtml(curMsg):''}</div>
+          <div class="bar"><i style="width:${pct}%"></i></div>
+        </div>
+        ${badge}
+        <div class="actions">${viewLink}</div>
+      </div>`;
+    }).join('');
+
+    const singleHtml = singles.map(t=>{
+      const [label,cls] = STATUS[t.status] || ['未知','b-queued'];
+      const running = ['downloading','transcribing','extracting','summarizing'].includes(t.status);
+      const delBtn = `<a class="link danger" data-del="${t.id}" title="删除任务及产物">删除</a>`;
+      const rerunBtn = (t.status==='failed'||t.status==='done') ? `<a class="link" data-rerun="${t.id}" title="重新解析">重跑</a>` : '';
+      const actions = t.status==='done'
+        ? `<a class="link" data-view="${t.id}">查看</a> <a class="link" href="/api/tasks/${t.id}/html?inline=1" target="_blank" title="手机浏览器直接看（带图，无需解压）">📱手机看</a> <a class="link" href="/api/tasks/${t.id}/bundle" download>下载(含图 zip)</a> ${rerunBtn} ${delBtn}`
+        : (t.status==='failed' ? `<span class="link" title="${escapeAttr(t.error||'')}" data-view="${t.id}">详情</span> ${rerunBtn} ${delBtn}` : `<span class="muted"></span> ${delBtn}`);
+      return `<div class="task">
+        <div class="info">
+          <div class="title"><input type="checkbox" class="chk" data-sel="${t.id}"> #${t.id} ${escapeHtml(t.title||t.url)}</div>
+          <div class="meta">${escapeHtml(t.stage_message||label)}${t.duration_sec?`　时长 ${fmtDur(t.duration_sec)}`:''}</div>
+          ${running?`<div class="bar"><i style="width:${t.progress}%"></i></div>`:''}
+        </div>
+        <span class="badge ${cls}">${label}</span>
+        <div class="actions">${actions}</div>
+      </div>`;
+    }).join('');
+
+    box.innerHTML = collectionHtml + singleHtml;
+    box.querySelectorAll('[data-view]').forEach(a=>a.onclick=()=>viewTask(a.dataset.view));
+    box.querySelectorAll('[data-coll]').forEach(a=>a.onclick=(e)=>{e.preventDefault();viewCollection(a.dataset.coll);});
+    box.querySelectorAll('[data-del]').forEach(a=>a.onclick=()=>deleteTask(a.dataset.del));
+    box.querySelectorAll('[data-rerun]').forEach(a=>a.onclick=()=>rerunTask(a.dataset.rerun));
+    box.querySelectorAll('[data-sel]').forEach(c=>c.onchange=syncBatchBar);
+    syncSelAll();
+    if(list.some(t=>['downloading','transcribing','extracting','summarizing'].includes(t.status)||t.status==='queued')){
+      if(!timer) timer = setInterval(load, 4000);
+    } else { if(timer){ clearInterval(timer); timer=null; } }
+  }catch(e){ /* ignore transient */ }
+}
+
+// ---- 批量选择 ----
+function selectedIds(){
+  return [...document.querySelectorAll('#tasks [data-sel]:checked')].map(c=>c.dataset.sel);
+}
+function syncBatchBar(){
+  const n = selectedIds().length;
+  $('#batchDel').style.display = n ? '' : 'none';
+  $('#batchRerun').style.display = n ? '' : 'none';
+  $('#batchDel').textContent = `删除所选(${n})`;
+  $('#batchRerun').textContent = `重跑所选(${n})`;
+  syncSelAll();
+}
+function syncSelAll(){
+  const all = [...document.querySelectorAll('#tasks [data-sel]')];
+  const sel = $('#selAll'); if(!sel) return;
+  sel.checked = all.length>0 && all.every(c=>c.checked);
+}
+async function batchDelete(){
+  const ids = selectedIds(); if(!ids.length) return;
+  if(!confirm(`删除选中的 ${ids.length} 个任务及其产物？不可恢复。`)) return;
+  for(const id of ids){ try{ await fetch('/api/tasks/'+id,{method:'DELETE'}); }catch(e){} }
+  $('#selAll').checked=false; load();
+}
+async function batchRerun(){
+  const ids = selectedIds(); if(!ids.length) return;
+  if(!confirm(`重跑选中的 ${ids.length} 个任务？`)) return;
+  for(const id of ids){ try{ await fetch('/api/tasks/'+id+'/rerun',{method:'POST'}); }catch(e){} }
+  $('#selAll').checked=false; load();
+}
+
+async function viewCollection(cid){
+  $('#modalTitle').textContent = '合集总览';
+  $('#modalDownload').href = '/api/collections/'+cid+'/bundle';
+  $('#modalDownload').setAttribute('download','');
+  const _mp = $('#modalPhone'); _mp.style.display=''; _mp.href = '/api/collections/'+cid+'/html?inline=1';   // 合集手机看：总览页可点进各讲
+  const body = $('#modalBody');
+  const mr = await fetch('/api/collections/'+cid+'/markdown');
+  if(mr.ok){
+    // 总览页里的 (task_X.md) 链接要能点开对应分P
+    let md = await mr.text();
+    body.innerHTML = renderMarkdown(md);
+    // 把指向 task_N.md 的链接改成点击打开该分P
+    body.querySelectorAll('a').forEach(a=>{
+      const m = (a.getAttribute('href')||'').match(/task_(\d+)\.md/);
+      if(m){ a.href='#'; a.onclick=(e)=>{e.preventDefault(); viewTask(m[1]);}; }
+    });
+  } else {
+    body.innerHTML = '<pre>总览页尚未生成（等至少一集完成）</pre>';
+  }
+  $('#modal').classList.add('show');
+}
+
+async function deleteTask(id){
+  if(!confirm('删除任务 #'+id+' 及其笔记、截图？不可恢复。')) return;
+  const r = await fetch('/api/tasks/'+id,{method:'DELETE'});
+  if(r.ok){ load(); } else { alert('删除失败：'+r.status); }
+}
+async function rerunTask(id){
+  const r = await fetch('/api/tasks/'+id+'/rerun',{method:'POST'});
+  if(r.ok){ load(); } else { alert('重跑失败：'+r.status); }
+}
+
+async function viewTask(id){
+  const r = await fetch('/api/tasks/'+id); const t = await r.json();
+  $('#modalTitle').textContent = '#'+id+' '+(t.title||'任务');
+  $('#modalDownload').href = '/api/tasks/'+id+'/bundle';
+  $('#modalDownload').setAttribute('download','');
+  const _mp = $('#modalPhone'); _mp.style.display=''; _mp.href = '/api/tasks/'+id+'/html?inline=1';
+  const body = $('#modalBody');
+  if(t.status==='failed'){ body.innerHTML = '<pre>'+escapeHtml('失败原因：\n\n'+(t.error||'未知'))+'</pre>'; }
+  else{
+    const mr = await fetch('/api/tasks/'+id+'/markdown');
+    const md = mr.ok ? await mr.text() : '笔记尚未生成';
+    body.innerHTML = renderMarkdown(md);
+  }
+  $('#modal').classList.add('show');
+}
+
+// 轻量 Markdown 渲染：转义后处理图片、标题、粗体、代码块、换行；够用不引库
+function renderMarkdown(md){
+  let s = escapeHtml(md);
+  // 章节时间戳标记 *Content-[mm:ss] -> 徽章
+  s = s.replace(/\*?Content-\s*\[?(\d{1,2}:\d{2})\]?\*?/g, '<span class="ts-badge">▶ $1</span>');
+  // 残留截图标记兜底清掉
+  s = s.replace(/\*?Screenshot-\s*\[?\d{1,2}:\d{2}\]?\*?/g, '');
+  // 代码块
+  s = s.replace(/```([\s\S]*?)```/g, (m,c)=>'<pre class="code">'+c+'</pre>');
+  // 图片
+  s = s.replace(/!\[([^\]]*)\]\(([^)]+)\)/g, (m,alt,url)=>'<img class="shot" src="'+url+'" alt="'+alt+'" loading="lazy">');
+  // 普通链接 [text](url)（图片已处理完，剩下的都是文字链接）
+  s = s.replace(/\[([^\]]+)\]\(([^)]+)\)/g, (m,text,url)=>'<a class="md-link" href="'+url+'">'+text+'</a>');
+  // 图片下的 “（mm:ss 画面）” 图注 -> em
+  s = s.replace(/^（(\d{1,2}:\d{2} 画面)）$/gm, '<em>（$1）</em>');
+  // 标题
+  s = s.replace(/^###### (.*)$/gm,'<h6>$1</h6>').replace(/^##### (.*)$/gm,'<h5>$1</h5>')
+       .replace(/^#### (.*)$/gm,'<h4>$1</h4>').replace(/^### (.*)$/gm,'<h3>$1</h3>')
+       .replace(/^## (.*)$/gm,'<h2>$1</h2>').replace(/^# (.*)$/gm,'<h1>$1</h1>');
+  // 粗体
+  s = s.replace(/\*\*([^*]+)\*\*/g,'<strong>$1</strong>');
+  // 斜体（图注用）
+  s = s.replace(/\*([^*\n]+)\*/g,'<em>$1</em>');
+  // 引用
+  s = s.replace(/^&gt; (.*)$/gm,'<span class="quote">$1</span>');
+  // 行内代码
+  s = s.replace(/`([^`]+)`/g,'<code>$1</code>');
+  // 表格：处理连续的 | ... | 行块
+  s = renderTables(s);
+  // 换行
+  s = s.replace(/\n/g,'<br>');
+  return s;
+}
+
+// 把连续以 | 开头的行渲染成 <table>（第二行若是 --- 分隔则作为表头分隔）
+function renderTables(text){
+  var lines = text.split('\n');
+  var out = [], i = 0;
+  function isRow(l){ return /^\s*\|.*\|\s*$/.test(l); }
+  function cells(l){ return l.trim().replace(/^\||\|$/g,'').split('|').map(function(c){return c.trim();}); }
+  while(i < lines.length){
+    if(isRow(lines[i])){
+      var block = [];
+      while(i < lines.length && isRow(lines[i])){ block.push(lines[i]); i++; }
+      // 解析
+      var rows = block.map(cells);
+      var html = '<table class="md-table">';
+      var start = 0;
+      if(block.length > 1 && /^\s*:?-{2,}/.test(cells(block[1])[0]||'')){
+        // 有表头分隔行
+        html += '<thead><tr>' + rows[0].map(function(c){return '<th>'+c+'</th>';}).join('') + '</tr></thead><tbody>';
+        start = 2;
+      } else {
+        html += '<tbody>';
+        start = 0;
+      }
+      for(var r = start; r < rows.length; r++){
+        if(rows[r].length===1 && rows[r][0]==='') continue;
+        html += '<tr>' + rows[r].map(function(c){return '<td>'+c+'</td>';}).join('') + '</tr>';
+      }
+      html += '</tbody></table>';
+      out.push(html);
+    } else {
+      out.push(lines[i]); i++;
+    }
+  }
+  return out.join('\n');
+}
+
+function fmtDur(s){ s=Math.round(s); const h=Math.floor(s/3600),m=Math.floor(s%3600/60); return h?`${h}时${m}分`:`${m}分`; }
+function escapeHtml(s){ return (s||'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+function escapeAttr(s){ return escapeHtml(s).replace(/\n/g,' '); }
+
+$('#submit').onclick = submit;
+$('#submitParts').onclick = submitParts;
+$('#partsSelectAll').onclick = ()=>{ document.querySelectorAll('#partsList input').forEach(i=>i.checked=true); };
+$('#partsSelectNone').onclick = ()=>{ document.querySelectorAll('#partsList input').forEach(i=>i.checked=false); };
+$('#url').addEventListener('keydown', e=>{ if(e.key==='Enter') submit(); });
+$('#refresh').onclick = load;
+$('#search').addEventListener('input', load);
+$('#statusFilter').onchange = load;
+$('#selAll').onchange = ()=>{ document.querySelectorAll('#tasks [data-sel]').forEach(c=>c.checked=$('#selAll').checked); syncBatchBar(); };
+$('#batchDel').onclick = batchDelete;
+$('#batchRerun').onclick = batchRerun;
+$('#modalClose').onclick = ()=> $('#modal').classList.remove('show');
+$('#modal').onclick = e=>{ if(e.target.id==='modal') $('#modal').classList.remove('show'); };
+load();
+setInterval(load, 8000); // 兜底轮询
+</script>
+</body>
+</html>
