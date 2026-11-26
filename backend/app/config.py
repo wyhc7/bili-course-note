@@ -57,9 +57,13 @@ TRANSCRIBE_PROVIDER = os.getenv("TRANSCRIBE_PROVIDER", "local")
 
 # ---- 抽帧 / 视觉 ----
 # 抽帧 / 视觉
-# 密集抽帧间隔（秒）——越小候选越多、截图越密，但抽帧更久。网课 15s 兼顾密度与速度
-DENSE_FRAME_INTERVAL_SEC = int(os.getenv("DENSE_FRAME_INTERVAL_SEC", "15"))
-# 相邻帧 MD5 去重（没翻页就跳过），保持 true 省视觉调用
+# 密集抽帧间隔（秒）——越小候选越多、截图越密，但抽帧更久。
+# 10s 采样 + 感知哈希去重，既能抓住翻页，又不会让候选爆炸
+DENSE_FRAME_INTERVAL_SEC = int(os.getenv("DENSE_FRAME_INTERVAL_SEC", "10"))
+# 相邻帧去重：感知哈希（dHash）汉明距离 <= 该值视为同一画面（0=关闭去重）
+# 64 位哈希，0-4 几乎同图，5-8 同页轻微动效，>12 基本是换页
+FRAME_DEDUPE_DISTANCE = int(os.getenv("FRAME_DEDUPE_DISTANCE", "6"))
+# 是否开启相邻帧去重
 FRAME_DEDUPE = os.getenv("FRAME_DEDUPE", "true").lower() == "true"
 # 目标截图密度：约每多少秒一张（用于给 LLM 数量下限）——120s=每2分钟一张
 SCREENSHOT_EVERY_SEC = int(os.getenv("SCREENSHOT_EVERY_SEC", "120"))
@@ -67,6 +71,10 @@ SCREENSHOT_EVERY_SEC = int(os.getenv("SCREENSHOT_EVERY_SEC", "120"))
 SCREENSHOT_MIN_GAP_SEC = int(os.getenv("SCREENSHOT_MIN_GAP_SEC", "8"))
 # 单篇最多截图数（防 LLM 失控）
 MAX_SCREENSHOTS = int(os.getenv("MAX_SCREENSHOTS", "40"))
+# 截图时间点吸附容差（秒）：标记落在某个已抽帧附近就复用那张，不再二次 ffmpeg
+SNAP_TOLERANCE_SEC = int(os.getenv("SNAP_TOLERANCE_SEC", "20"))
+# 最终插图宽度（px），0=保持原片分辨率；1280 对板书/公式足够，体积减半
+SHOT_WIDTH = int(os.getenv("SHOT_WIDTH", "1280"))
 # 旧的等间隔兜底（保留兼容，现已不用）
 FRAME_INTERVAL_SEC = int(os.getenv("FRAME_INTERVAL_SEC", "60"))
 # 是否需要下载视频流来抽帧（false 则只转写，最省流量和磁盘，2核4G 推荐先关）
@@ -78,19 +86,26 @@ VISION_MODEL = os.getenv("VISION_MODEL", "")
 # 留空则复用 LLM_BASE_URL / LLM_API_KEY
 VISION_BASE_URL = os.getenv("VISION_BASE_URL", "")
 VISION_API_KEY = os.getenv("VISION_API_KEY", "")
-# 最多分析多少帧（作为选图参考喂给 LLM；越多越准但越贵）
+# 最多分析多少帧（作为选图参考喂给 LLM 的下限；越多越准但越贵）
 VISION_MAX_FRAMES = int(os.getenv("VISION_MAX_FRAMES", "36"))
+# 按时长自适应：每分钟取多少帧（20 分钟课 ≈ 60 帧 ≈ 7 张网格）
+VISION_FRAMES_PER_MIN = int(os.getenv("VISION_FRAMES_PER_MIN", "3"))
+# 自适应的硬上限（2 小时课最多 240 帧 = 27 次视觉调用）
+VISION_MAX_FRAMES_CAP = int(os.getenv("VISION_MAX_FRAMES_CAP", "240"))
 # ---- 网格拼图（参考 BiliNote VideoReader：把多帧拼成一张网格图，左上角烙时间戳）----
 # 每张网格图的列数/行数：3x3=9 帧拼一张，一次视觉调用看 9 个候选点（省调用、看得到时间线上下文）
 VISION_GRID_COLS = int(os.getenv("VISION_GRID_COLS", "3"))
 VISION_GRID_ROWS = int(os.getenv("VISION_GRID_ROWS", "3"))
-# 网格里每一格缩略图的宽/高（px）——越小越省 token，960x540 看板书清晰
-VISION_CELL_W = int(os.getenv("VISION_CELL_W", "640"))
-VISION_CELL_H = int(os.getenv("VISION_CELL_H", "360"))
+# 网格里每一格缩略图的宽/高（px）——太小读不出公式下标，768x432 是清晰度与 token 的平衡点
+VISION_CELL_W = int(os.getenv("VISION_CELL_W", "768"))
+VISION_CELL_H = int(os.getenv("VISION_CELL_H", "432"))
 # 网格图 JPEG 质量
 VISION_GRID_QUALITY = int(os.getenv("VISION_GRID_QUALITY", "80"))
 # 是否用网格拼图模式（true=拼图一次看9帧；false=旧的逐帧调用）
 VISION_USE_GRID = os.getenv("VISION_USE_GRID", "true").lower() == "true"
+# 单次视觉调用的重试：网络抖动时不要整格候选报废（总尝试次数，含首次）
+VISION_RETRY_ATTEMPTS = int(os.getenv("VISION_RETRY_ATTEMPTS", "3"))
+VISION_RETRY_BACKOFF_SEC = int(os.getenv("VISION_RETRY_BACKOFF_SEC", "2"))
 
 # ---- LLM 总结 ----
 # OpenAI 兼容接口。默认 DeepSeek，可换通义/豆包等。
@@ -98,6 +113,8 @@ LLM_BASE_URL = os.getenv("LLM_BASE_URL", "https://api.deepseek.com/v1")
 LLM_API_KEY = os.getenv("LLM_API_KEY", "")
 LLM_MODEL = os.getenv("LLM_MODEL", "deepseek-chat")
 LLM_MAX_CHARS = int(os.getenv("LLM_MAX_CHARS", "48000"))  # 单次喂给 LLM 的上限
+# 单次输出上限（token）。实际取 min(本值, 按输入体量估算)，避免长课笔记被腰斩
+LLM_MAX_OUTPUT_TOKENS = int(os.getenv("LLM_MAX_OUTPUT_TOKENS", "8000"))
 
 # 笔记风格: 网课/学术/口语/重点
 NOTE_STYLE = os.getenv("NOTE_STYLE", "网课")
@@ -110,5 +127,8 @@ RETRY_BACKOFF_SEC = int(os.getenv("RETRY_BACKOFF_SEC", "30"))
 
 # ---- 磁盘清理（2核4G 关键，跑多了不清理会爆盘）----
 CLEANUP_AFTER_DONE = os.getenv("CLEANUP_AFTER_DONE", "true").lower() == "true"
-# 关键帧是否保留：视觉开启时必须保留（否则笔记内嵌截图会 404）
-KEEP_FRAMES = (os.getenv("KEEP_FRAMES", "false").lower() == "true") or VISION_ENABLED
+# 关键帧是否全量保留：
+#   false(默认)=只保留笔记正文真正引用的 shot_*.jpg，删掉候选帧 f_*.jpg 与网格图
+#   true = 整个 task 目录全留（体积大，一般不需要）
+# 注意：默认值已保证"笔记里的图不会 404"，不需要再为了图去开 true
+KEEP_FRAMES = os.getenv("KEEP_FRAMES", "false").lower() == "true"

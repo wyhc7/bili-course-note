@@ -88,19 +88,35 @@ python -m uvicorn backend.app.main:app --host 0.0.0.0 --port 8000
 | `VISION_ENABLED` | 视觉理解开关，需配 `VISION_API_KEY`（如通义 qwen-vl-max） |
 | `TRANSCRIBE_PROVIDER` | `local` 本地 / `cloud` 云端（不想让 2核4G 硬扛时切） |
 | `CLEANUP_AFTER_DONE` | 完成后删临时文件，**务必 true** |
-| `DENSE_FRAME_INTERVAL_SEC` | 密集抽帧间隔，默认 15 秒（越小候选越多、截图越密，但抽帧更久） |
+| `DENSE_FRAME_INTERVAL_SEC` | 密集抽帧间隔，默认 **10** 秒（越小候选越多，再靠感知哈希去重压回来） |
+| `FRAME_DEDUPE_DISTANCE` | 相邻帧感知哈希（dHash）距离阈值，默认 6；`0`=关闭去重 |
 | `SCREENSHOT_EVERY_SEC` | 目标截图密度，默认 120 秒/张（给 LLM 数量下限，控制一篇的截图数） |
-| `MAX_SCREENSHOTS` | 单篇截图上限，默认 40（防失控） |
-| `VISION_MAX_FRAMES` | 送去视觉分析的帧数上限，默认 36（越多 LLM 选图越准，越耗 API） |
+| `SCREENSHOT_MIN_GAP_SEC` / `MAX_SCREENSHOTS` | 相邻截图最小间隔 8s / 单篇上限 40 张（防同页重复与失控） |
+| `SNAP_TOLERANCE_SEC` | 标记点吸附容差，默认 20s：落在已抽帧附近就直接复用那张图，不再二次截帧 |
+| `SHOT_WIDTH` | 最终插图宽度，默认 1280（`0`=原片分辨率） |
+| `VISION_MAX_FRAMES` / `VISION_FRAMES_PER_MIN` | 候选帧预算：下限 36，且按时长每分钟 3 帧自适应（上限 `VISION_MAX_FRAMES_CAP`=240） |
 | `VISION_USE_GRID` | 网格拼图模式（参考 BiliNote），默认 `true`。见下方"网格拼图" |
 | `VISION_GRID_COLS` / `VISION_GRID_ROWS` | 网格列/行，默认 `3`×`3`=每张拼 9 帧 |
-| `VISION_CELL_W` / `VISION_CELL_H` | 网格每格缩略图尺寸，默认 `640`×`360`（越小越省 token） |
+| `VISION_CELL_W` / `VISION_CELL_H` | 网格每格缩略图尺寸，默认 `768`×`432`（太小读不出公式下标） |
+| `VISION_RETRY_ATTEMPTS` / `VISION_RETRY_BACKOFF_SEC` | 视觉调用重试次数与退避基数（默认 3 次 / 2s），防网络抖动导致整格候选报废 |
+| `LLM_MAX_OUTPUT_TOKENS` | 单次输出上限，默认 8000；实际取 `min(本值, 按输入体量估算)`，防止长课笔记被截断 |
 
 ### 网格拼图（借鉴 BiliNote VideoReader）
 
-默认开启。做法：把候选帧按 **3×3 拼成一张网格图，每格左上角烙印 `mm:ss` 时间戳**，然后**一次视觉调用看整张网格**（9 个候选点 + 时间线上下文），模型按时间戳逐格返回画面描述，再喂给 LLM 选插入点。
+默认开启。做法：把候选帧按 **3×3 拼成一张网格图，每格左上角烙印 `#序号 mm:ss`**，然后**一次视觉调用看整张网格**（9 个候选点 + 时间线上下文），模型按 `#序号` 逐格返回画面描述，再喂给 LLM 选插入点。
 
 相比逐帧调用：**视觉调用次数 ÷ 9**（一节 20 分钟课从 36 次降到 4 次），且模型能看到相邻画面变化，选图更准更快。实测 P6「克拉默法则」：36 次调用 → **4 次网格调用**，整篇处理从 ~308s 降到 ~203s，产出 16 张精准截图。
+
+> 用 `#序号` 而不是让模型复述 `mm:ss`，是因为模型最容易把画面角上的数字看错一位；序号错了会整格错位。
+
+### 两阶段截图（标记 → 吸附 → 落图）
+
+1. LLM 只输出 `*Screenshot-[mm:ss]` 占位，不接触图片 URL；
+2. 落图时先把标记**吸附到最近的已抽帧**（`SNAP_TOLERANCE_SEC` 内），直接复用那张图 —— 保证笔记里的图就是"当初给模型看的那一帧"，同时省掉一次 ffmpeg；
+3. 只有候选没覆盖的时间点才 `grab_frame_at` 定点截帧（混合 seek：前 1s 快速定位 + 后 1s 精确解码，既快又不会偏到关键帧）；
+4. 任务结束后只保留正文引用到的截图，候选帧与网格图删掉，**不会出现图片 404**。
+
+> 视觉描述按 `bvid_cid` 缓存在 `data/cache/vision_*.json`：换风格重跑、失败重试只补缺失的时间点，不重复调视觉 API。缓存只存 `{时间戳: 描述}`，图片 URL 每次按当前任务目录重新映射，不会指向旧任务。
 
 ## 六、2核4G 现实预期（重要）
 

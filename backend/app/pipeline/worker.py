@@ -48,8 +48,12 @@ def _save_cache(bvid: str, cid, segments: list[dict]) -> None:
         pass
 
 
-def _cleanup(tid: int):
-    """任务完成后清理大文件：删下载的视频/音频；帧按 KEEP_FRAMES 决定是否保留。"""
+def _cleanup(tid: int, keep_imgs: set[str] | None = None):
+    """
+    任务完成后清理大文件：删下载的视频/音频。
+    帧目录只删"没被笔记引用"的候选帧（f_*.jpg）和网格图（grid_*.jpg），
+    保留下文字引用的 shot_*.jpg —— 否则网页上的截图会全部 404。
+    """
     if not config.CLEANUP_AFTER_DONE:
         return
     work = config.DATA_DIR / f"task_{tid}"
@@ -58,15 +62,29 @@ def _cleanup(tid: int):
     audio = config.AUDIO_DIR / f"task_{tid}.wav"
     if audio.exists():
         audio.unlink(missing_ok=True)
-    if not config.KEEP_FRAMES:
-        frames_dir = config.FRAMES_DIR / f"task_{tid}"
-        if frames_dir.exists():
-            shutil.rmtree(frames_dir, ignore_errors=True)
+
+    frames_dir = config.FRAMES_DIR / f"task_{tid}"
+    if not frames_dir.exists() or config.KEEP_FRAMES:
+        return
+    # /frames/task_x/shot_30.jpg -> shot_30.jpg
+    keep = {Path(u[len("/frames/"):]).name for u in (keep_imgs or set())
+            if u.startswith("/frames/")}
+    for f in frames_dir.iterdir():
+        if f.is_dir():
+            shutil.rmtree(f, ignore_errors=True)
+        elif f.name not in keep:
+            f.unlink(missing_ok=True)
+    try:
+        if not any(frames_dir.iterdir()):
+            frames_dir.rmdir()
+    except Exception:
+        pass
 
 
 def _run_one(task: dict):
     tid = task["id"]
     url = task["url"]
+    used_imgs: set[str] = set()
     try:
         def setp(status, progress, msg):
             db.update_task(tid, status=status, progress=progress, stage_message=msg)
@@ -123,7 +141,9 @@ def _run_one(task: dict):
                     progress_cb=lambda m: setp(db.EXTRACTING, 75, m),
                 )
                 vision = frames_mod.describe_frames(
-                    frms, progress_cb=lambda m: setp(db.EXTRACTING, 80, m), task_id=tid)
+                    frms, progress_cb=lambda m: setp(db.EXTRACTING, 80, m), task_id=tid,
+                    duration_sec=meta.get("duration_sec", 0),
+                    cache_key=(f"{bvid}_{p_cid or 'p1'}" if bvid else None))
             except Exception as e:
                 vision = []
                 db.update_task(tid, stage_message=f"抽帧/视觉失败，跳过：{e}")
@@ -146,10 +166,10 @@ def _run_one(task: dict):
             progress_cb=lambda m: setp(db.SUMMARIZING, 88, m),
         )
 
-        # 5) 两阶段截图：标记 -> 精确定点截帧 -> 替换
+        # 5) 两阶段截图：标记 -> 吸附到已有候选帧（未覆盖才定点截帧）-> 替换
         if meta["screenshot"] and meta.get("video_path"):
-            md = summarize.fill_screenshots(
-                md, meta["video_path"], tid,
+            md, used_imgs = summarize.fill_screenshots(
+                md, meta["video_path"], tid, vision=vision,
                 progress_cb=lambda m: setp(db.SUMMARIZING, 95, m),
             )
         md_path = summarize.save_markdown(tid, md)
@@ -179,8 +199,9 @@ def _run_one(task: dict):
                            error=f"{e}\n\n{tb[-1500:]}")
     finally:
         # 无论成功失败都清理大文件，防止磁盘被撑爆（2核4G 关键）
+        # 只保留笔记正文引用到的截图，候选帧与网格图删掉
         try:
-            _cleanup(tid)
+            _cleanup(tid, keep_imgs=used_imgs)
         except Exception:
             pass
 
