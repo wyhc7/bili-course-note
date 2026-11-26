@@ -327,11 +327,11 @@ def fill_screenshots(doc: str, video_path: str, task_id: int,
     """
     扫出所有 Screenshot 标记，替换成图片。返回 (新正文, 被引用的图片 URL 集合)。
 
-    与旧实现的差别：
-      - 标记先吸附到最近的候选帧（容差内），直接复用已抽好的帧文件 —— 截图画面
-        就是"当初给模型看的那一帧"，且省掉一次 ffmpeg
-      - 只有候选没覆盖到的秒数才走 grab_frame_at 定点截帧
-      - 同一秒只截一次；相邻过近的合并；超上限截断
+    处理顺序：
+      1) 标记吸附到最近候选帧（容差内），复用该帧文件；未覆盖才 ffmpeg 定点截帧
+      2) 相邻过近去重（MIN_GAP）+ 总量上限（MAX_SCREENSHOTS）
+      3) 补洞：相邻截图间隔 > SCREENSHOT_MAX_GAP_SEC 时，从候选帧里按中间点补一张，
+         保证"大段没图"不会发生（LLM 选点偏稀时兜底，确保有效密度）
     """
     marks = extract_screenshot_marks(doc)
     if not marks:
@@ -360,23 +360,74 @@ def fill_screenshots(doc: str, video_path: str, task_id: int,
 
     from . import frames as frames_mod
 
-    total, done, cache = len(keep_set), 0, {}
+    # 先算出"已保留"的秒数序列，用于补洞
+    kept_secs = sorted(plan[i][1] for i in keep_set)
+    used_ts = set(kept_secs)
+    # 3) 补洞：找超过 MAX_GAP 的空档，从候选帧取中间点补一张（挂在"前一张"截图后面）
+    gap_fill: dict[int, list[dict]] = {}   # 前一张截图秒数 -> [要补的候选帧 ...]
+    max_gap = config.SCREENSHOT_MAX_GAP_SEC
+    total_cap = config.MAX_SCREENSHOTS
+    if max_gap and max_gap > 0 and cand and kept_secs:
+        cand_by_ts = {int(c["ts"]): c for c in cand}
+        placed_n = len(kept_secs)
+        # 也考虑开头(0)和结尾(dur)之外的段内空档：只在已有截图之间补，避免全篇无标记时不补
+        prev = None
+        for s in kept_secs:
+            if prev is not None and (s - prev) > max_gap and placed_n < total_cap:
+                # 该空档内反复补，直到每段 <= max_gap
+                cursor = prev
+                while (s - cursor) > max_gap and placed_n < total_cap:
+                    target = cursor + max_gap
+                    # 找离 target 最近、且未被使用、且不太近已用点的候选
+                    best, bd = None, 10 ** 9
+                    for c in cand:
+                        ct = int(c["ts"])
+                        if ct in used_ts or not (cursor + config.SCREENSHOT_MIN_GAP_SEC <= ct <= s - config.SCREENSHOT_MIN_GAP_SEC):
+                            continue
+                        d = abs(ct - target)
+                        if d < bd:
+                            bd, best = d, c
+                    if not best:
+                        break
+                    gap_fill.setdefault(prev, []).append(best)
+                    used_ts.add(int(best["ts"]))
+                    cursor = int(best["ts"])
+                    placed_n += 1
+            prev = s
+
+    total = len(keep_set) + sum(len(v) for v in gap_fill.values())
+    done, cache = 0, {}
+
+    def _emit(sec: int, hit):
+        """生成一张截图的 markdown 块（命中候选帧则复用文件，否则定点截帧）。"""
+        nonlocal done
+        nonlocal cache
+        done += 1
+        if progress_cb:
+            progress_cb(f"生成截图 {done}/{total}（{_fmt_ts(sec)}）")
+        if hit:
+            url = hit["img_url"]
+        else:
+            if sec not in cache:
+                cache[sec] = frames_mod.grab_frame_at(video_path, task_id, sec)
+            url = cache[sec]
+        return f"![{_fmt_ts(sec)}]({url})\n\n（{_fmt_ts(sec)} 画面）"
+
     for i, (marker, eff, hit) in enumerate(plan):
         if i not in keep_set:
             doc = doc.replace(marker, "", 1)  # 跳过或超限：删掉标记，不破坏正文
             continue
-        done += 1
-        if progress_cb:
-            progress_cb(f"生成截图 {done}/{total}（{_fmt_ts(eff)}）")
         try:
-            if hit:
-                url = hit["img_url"]
-            else:
-                if eff not in cache:
-                    cache[eff] = frames_mod.grab_frame_at(video_path, task_id, eff)
-                url = cache[eff]
-            doc = doc.replace(
-                marker, f"![{_fmt_ts(eff)}]({url})\n\n（{_fmt_ts(eff)} 画面）", 1)
+            block = _emit(eff, hit)
+            # 该截图之后要不要补洞
+            extra = gap_fill.get(eff)
+            if extra:
+                for c in extra:
+                    try:
+                        block += "\n\n" + _emit(int(c["ts"]), c)
+                    except Exception:
+                        pass
+            doc = doc.replace(marker, block, 1)
         except Exception:
             doc = doc.replace(marker, "", 1)
 

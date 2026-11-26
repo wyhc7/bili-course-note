@@ -71,6 +71,9 @@ SCREENSHOT_EVERY_SEC = int(os.getenv("SCREENSHOT_EVERY_SEC", "120"))
 SCREENSHOT_MIN_GAP_SEC = int(os.getenv("SCREENSHOT_MIN_GAP_SEC", "8"))
 # 单篇最多截图数（防 LLM 失控）
 MAX_SCREENSHOTS = int(os.getenv("MAX_SCREENSHOTS", "40"))
+# 截图最大空档（秒）：相邻两张截图若间隔超过此值，自动从候选帧补一张，保证密度下限。
+# 0 表示关闭补洞。默认 90s（每 1.5 分钟至少一张，避免大段无图）
+SCREENSHOT_MAX_GAP_SEC = int(os.getenv("SCREENSHOT_MAX_GAP_SEC", "90"))
 # 截图时间点吸附容差（秒）：标记落在某个已抽帧附近就复用那张，不再二次 ffmpeg
 SNAP_TOLERANCE_SEC = int(os.getenv("SNAP_TOLERANCE_SEC", "20"))
 # 最终插图宽度（px），0=保持原片分辨率；1280 对板书/公式足够，体积减半
