@@ -28,6 +28,11 @@ config.OUTPUT_DIR = config.DATA_DIR / "output"
 for _d in (config.DATA_DIR, config.FRAMES_DIR, config.AUDIO_DIR, config.OUTPUT_DIR):
     _d.mkdir(parents=True, exist_ok=True)
 
+# 固定与清理/视觉相关的配置，避免测试结果受宿主 .env（如 VISION_ENABLED=true）影响
+config.CLEANUP_AFTER_DONE = True
+config.KEEP_FRAMES = False
+config.VISION_ENABLED = False
+
 from app.pipeline import frames, summarize, worker
 
 

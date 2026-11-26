@@ -307,7 +307,9 @@ async function load(){
       const pct = Math.round(done/arr.length*100);
       const badge = done===arr.length ? '<span class="badge b-done">全部完成</span>'
         : (failed===arr.length ? '<span class="badge b-fail">全部失败</span>' : '<span class="badge b-run">处理中</span>');
-      const viewLink = done>0 ? `<a class="link" data-coll="${cid}">总览</a> <a class="link" href="/api/collections/${cid}/html?inline=1" target="_blank" title="手机浏览器直接看总览（可点进各讲）">📱手机看</a> <a class="link" href="/api/collections/${cid}/bundle" download>下载(含图 zip)</a>` : '';
+      const viewLink = (done>0 ? `<a class="link" data-coll="${cid}">总览</a> <a class="link" href="/api/collections/${cid}/html?inline=1" target="_blank" title="手机浏览器直接看总览（可点进各讲）">📱手机看</a> <a class="link" href="/api/collections/${cid}/bundle" download>下载(含图 zip)</a>` : '');
+      const collDel = `<a class="link danger" data-coldel="${cid}" title="删除整个合集（所有分P及产物）">删除合集</a>`;
+      const collRerun = `<a class="link" data-colrerun="${cid}" title="重跑整个合集">重跑合集</a>`;
       const activeHref = done>0 ? `<a class="link" href="#" data-coll="${cid}">总览</a>` : '';
       const curMsg = running ? `正处理 P${running.part_index}（${running.stage_message||''}）` : '';
       return `<div class="task coll-task">
@@ -317,7 +319,7 @@ async function load(){
           <div class="bar"><i style="width:${pct}%"></i></div>
         </div>
         ${badge}
-        <div class="actions">${viewLink}</div>
+        <div class="actions">${viewLink} ${collRerun} ${collDel}</div>
       </div>`;
     }).join('');
 
@@ -345,6 +347,8 @@ async function load(){
     box.querySelectorAll('[data-coll]').forEach(a=>a.onclick=(e)=>{e.preventDefault();viewCollection(a.dataset.coll);});
     box.querySelectorAll('[data-del]').forEach(a=>a.onclick=()=>deleteTask(a.dataset.del));
     box.querySelectorAll('[data-rerun]').forEach(a=>a.onclick=()=>rerunTask(a.dataset.rerun));
+    box.querySelectorAll('[data-coldel]').forEach(a=>a.onclick=()=>deleteCollection(a.dataset.coldel));
+    box.querySelectorAll('[data-colrerun]').forEach(a=>a.onclick=()=>rerunCollection(a.dataset.colrerun));
     box.querySelectorAll('[data-sel]').forEach(c=>c.onchange=syncBatchBar);
     syncSelAll();
     if(list.some(t=>['downloading','transcribing','extracting','summarizing'].includes(t.status)||t.status==='queued')){
@@ -413,6 +417,16 @@ async function deleteTask(id){
 async function rerunTask(id){
   const r = await fetch('/api/tasks/'+id+'/rerun',{method:'POST'});
   if(r.ok){ load(); } else { alert('重跑失败：'+r.status); }
+}
+async function deleteCollection(cid){
+  if(!confirm('删除整个合集（所有分P的笔记、截图）？不可恢复。')) return;
+  const r = await fetch('/api/collections/'+cid,{method:'DELETE'});
+  if(r.ok){ load(); } else { alert('删除合集失败：'+r.status); }
+}
+async function rerunCollection(cid){
+  if(!confirm('重跑整个合集的所有分P？')) return;
+  const r = await fetch('/api/collections/'+cid+'/rerun',{method:'POST'});
+  if(r.ok){ load(); } else { alert('重跑合集失败：'+r.status); }
 }
 
 async function viewTask(id){

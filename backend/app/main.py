@@ -241,29 +241,62 @@ def task_rerun(tid: int):
     return {"id": tid, "status": db.QUEUED}
 
 
-@app.delete("/api/tasks/{tid}")
-def task_delete(tid: int):
-    """删除任务及其产物（笔记 md、帧图目录）。"""
+def _delete_task_artifacts(tid: int, output_md: str | None):
+    """删除单个任务的产物（笔记 md、帧图目录）。"""
     import shutil as _sh
-    t = db.get_task(tid)
-    if not t:
-        raise HTTPException(404, "任务不存在")
-    # 删笔记产物
     try:
-        if t.get("output_md"):
-            Path(t["output_md"]).unlink(missing_ok=True)
+        if output_md:
+            Path(output_md).unlink(missing_ok=True)
         (config.OUTPUT_DIR / f"task_{tid}.md").unlink(missing_ok=True)
     except Exception:
         pass
-    # 删帧目录
     try:
         fdir = config.FRAMES_DIR / f"task_{tid}"
         if fdir.exists():
             _sh.rmtree(fdir, ignore_errors=True)
     except Exception:
         pass
+
+
+@app.delete("/api/tasks/{tid}")
+def task_delete(tid: int):
+    """删除任务及其产物（笔记 md、帧图目录）。"""
+    t = db.get_task(tid)
+    if not t:
+        raise HTTPException(404, "任务不存在")
+    _delete_task_artifacts(tid, t.get("output_md"))
     db.delete_task(tid)
     return {"deleted": tid}
+
+
+@app.post("/api/collections/{cid}/rerun")
+def collection_rerun(cid: str):
+    """重跑整个合集：把所有分P重置为排队。"""
+    tasks = db.collection_tasks(cid)
+    if not tasks:
+        raise HTTPException(404, "合集不存在")
+    for t in tasks:
+        db.requeue_task(t["id"])
+    return {"rerun_collection": cid, "tasks": len(tasks)}
+
+
+@app.delete("/api/collections/{cid}")
+def collection_delete(cid: str):
+    """删除整个合集：所有分P任务 + 各自产物 + 总览文件。"""
+    tasks = db.collection_tasks(cid)
+    if not tasks:
+        raise HTTPException(404, "合集不存在")
+    n = 0
+    for t in tasks:
+        _delete_task_artifacts(t["id"], t.get("output_md"))
+        db.delete_task(t["id"])
+        n += 1
+    # 删总览 md
+    try:
+        (config.OUTPUT_DIR / f"collection_{cid}.md").unlink(missing_ok=True)
+    except Exception:
+        pass
+    return {"deleted_collection": cid, "tasks_removed": n}
 
 
 @app.get("/api/health")
