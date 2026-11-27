@@ -128,6 +128,16 @@ MAX_RETRY = int(os.getenv("MAX_RETRY", "2"))
 # 重试前等待秒数（指数退避：base * (2^已重试次数)）
 RETRY_BACKOFF_SEC = int(os.getenv("RETRY_BACKOFF_SEC", "30"))
 
+# ---- 磁盘预检（下载前拦一道，避免下到一半盘满白跑）----
+# 开关：true 时下载前检查剩余空间，不足直接报错（不进入重试）
+DISK_CHECK_ENABLED = os.getenv("DISK_CHECK_ENABLED", "true").lower() == "true"
+# 绝对下限（GB）：剩余低于此值一律拒绝，与视频长短无关
+DISK_MIN_FREE_GB = float(os.getenv("DISK_MIN_FREE_GB", "1.0"))
+# 按时长估算：每小时视频占多少 GB（720p 视频约 0.8 + wav 0.12 + 候选帧 0.05，取 1.0 留裕量）
+DISK_GB_PER_HOUR = float(os.getenv("DISK_GB_PER_HOUR", "1.0"))
+# 估算之外再留的余量（GB）：给数据库/日志/临时文件留缝
+DISK_SAFETY_GB = float(os.getenv("DISK_SAFETY_GB", "0.5"))
+
 # ---- 磁盘清理（2核4G 关键，跑多了不清理会爆盘）----
 CLEANUP_AFTER_DONE = os.getenv("CLEANUP_AFTER_DONE", "true").lower() == "true"
 # 关键帧是否全量保留：

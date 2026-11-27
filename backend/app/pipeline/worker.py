@@ -185,7 +185,9 @@ def _run_one(task: dict):
     except Exception as e:
         tb = traceback.format_exc()
         retry_count = int(task.get("retry_count") or 0)
-        if retry_count < config.MAX_RETRY:
+        # 磁盘不足重试也不会变出空间：直接判失败，别白等两轮退避（30s/60s）
+        no_retry = isinstance(e, download.DiskFullError)
+        if not no_retry and retry_count < config.MAX_RETRY:
             # 未超上限：设 not_before 让 worker 到点再取（不阻塞循环、不立即空转重试）
             wait = config.RETRY_BACKOFF_SEC * (2 ** retry_count)
             db.update_task(tid, status=db.QUEUED,
@@ -195,7 +197,8 @@ def _run_one(task: dict):
                            not_before=time.time() + wait,
                            progress=0)
         else:
-            db.update_task(tid, status=db.FAILED, stage_message="失败（重试次数已用尽）",
+            stage = "失败：磁盘空间不足（需手动清理）" if no_retry else "失败（重试次数已用尽）"
+            db.update_task(tid, status=db.FAILED, stage_message=stage,
                            error=f"{e}\n\n{tb[-1500:]}")
     finally:
         # 无论成功失败都清理大文件，防止磁盘被撑爆（2核4G 关键）

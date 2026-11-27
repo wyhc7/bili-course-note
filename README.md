@@ -88,6 +88,8 @@ python -m uvicorn backend.app.main:app --host 0.0.0.0 --port 8000
 | `VISION_ENABLED` | 视觉理解开关，需配 `VISION_API_KEY`（如通义 qwen-vl-max） |
 | `TRANSCRIBE_PROVIDER` | `local` 本地 / `cloud` 云端（不想让 2核4G 硬扛时切） |
 | `CLEANUP_AFTER_DONE` | 完成后删临时文件，**务必 true** |
+| `DISK_CHECK_ENABLED` | 下载前磁盘预检，默认 `true`；空间不足直接失败且不重试 |
+| `DISK_MIN_FREE_GB` / `DISK_GB_PER_HOUR` | 预检下限 1GB / 按时长估算 1GB 每小时（720p 实测约 0.8GB/h） |
 | `DENSE_FRAME_INTERVAL_SEC` | 密集抽帧间隔，默认 **10** 秒（越小候选越多，再靠感知哈希去重压回来） |
 | `FRAME_DEDUPE_DISTANCE` | 相邻帧感知哈希（dHash）距离阈值，默认 6；`0`=关闭去重 |
 | `SCREENSHOT_EVERY_SEC` | 目标截图密度，默认 120 秒/张（给 LLM 数量下限，控制一篇的截图数） |

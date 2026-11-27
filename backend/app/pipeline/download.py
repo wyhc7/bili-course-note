@@ -25,6 +25,10 @@ class DownloadError(Exception):
     pass
 
 
+class DiskFullError(DownloadError):
+    """剩余空间不足。故意单独建类：worker 见到它不重试（重试也不会变出空间）。"""
+
+
 _API_VIEW = "https://api.bilibili.com/x/web-interface/view"
 _API_PLAYURL = "https://api.bilibili.com/x/player/playurl"
 _BILI_HOME = "https://www.bilibili.com/"
@@ -151,6 +155,37 @@ def list_pages(url: str) -> dict:
             "pages": pages, "total": len(pages)}
 
 
+def estimate_need_bytes(duration_sec: float) -> int:
+    """按视频时长估算本次任务峰值占用（视频流 + wav + 候选帧）+ 安全余量。"""
+    hours = max(0.0, float(duration_sec or 0)) / 3600.0
+    need = config.DISK_GB_PER_HOUR * hours + config.DISK_SAFETY_GB
+    return max(int(config.DISK_MIN_FREE_GB * 1e9), int(need * 1e9))
+
+
+def _check_disk(duration_sec: float):
+    """
+    下载前预检磁盘。不足直接抛 DiskFullError —— 宁可现在就失败，
+    也不要下到 1.8GB 时 IO 报错白跑一趟（2 小时课的下载时间很贵）。
+    时长未知（0）时退回绝对下限判断，不会因为拿不到时长就放行。
+    """
+    if not config.DISK_CHECK_ENABLED:
+        return
+    try:
+        du = shutil.disk_usage(str(config.DATA_DIR))
+    except OSError:
+        return  # 查不到就不拦，别让预检本身成为故障点
+    need = estimate_need_bytes(duration_sec)
+    if du.free >= need:
+        return
+    mins = int(duration_sec // 60) if duration_sec else 0
+    span = f"，本视频时长约 {mins} 分钟" if mins else ""
+    raise DiskFullError(
+        f"磁盘空间不足：剩余 {du.free / 1e9:.1f}GB，预计需要 {need / 1e9:.1f}GB"
+        f"（估算含视频流、音频、抽帧）{span}。"
+        f"请清理 {config.DATA_DIR} 下的旧任务后重试。"
+    )
+
+
 def download(url: str, task_id: int, progress_cb=None,
              page_cid: int | None = None, page_title: str | None = None) -> dict:
     """
@@ -215,6 +250,9 @@ def download(url: str, task_id: int, progress_cb=None,
             duration = float(d.get("duration", 0))
         if not cid:
             raise DownloadError("未取到 cid")
+
+        # 1.5) 磁盘预检：时长已拿到，此时估算最准（短课不会被误拦）
+        _check_disk(duration)
 
         # 2) playurl（fnval=16 拿 dash）
         try:
