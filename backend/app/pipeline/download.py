@@ -194,7 +194,9 @@ def list_pages(url: str) -> dict:
 
 def estimate_need_bytes(duration_sec: float) -> int:
     """按视频时长估算本次任务峰值占用（视频流 + wav + 候选帧）+ 安全余量。"""
-    hours = max(0.0, float(duration_sec or 0)) / 3600.0
+    # 时长封顶：合集/多P 的 API 时长不可信（曾把整季 1752 分钟当成单集）
+    hours = min(max(0.0, float(duration_sec or 0)) / 3600.0,
+                config.DISK_ESTIMATE_MAX_HOURS)
     need = config.DISK_GB_PER_HOUR * hours + config.DISK_SAFETY_GB
     return max(int(config.DISK_MIN_FREE_GB * 1e9), int(need * 1e9))
 
@@ -321,7 +323,10 @@ def download(url: str, task_id: int, progress_cb=None,
             if page_title:
                 title = f"{title} · {page_title}"
         else:
-            duration = float(d.get("duration", 0))
+            # 优先取当前分P（pages[0]）的时长：合集里 d["duration"] 是整个合集的总时长
+            _pages = d.get("pages") or []
+            duration = (float(_pages[0].get("duration", 0))
+                        if _pages else float(d.get("duration", 0)))
         if not cid:
             raise DownloadError("未取到 cid")
 

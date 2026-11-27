@@ -143,6 +143,9 @@ DISK_MIN_FREE_GB = float(os.getenv("DISK_MIN_FREE_GB", "1.0"))
 DISK_GB_PER_HOUR = float(os.getenv("DISK_GB_PER_HOUR", "1.0"))
 # 估算之外再留的余量（GB）：给数据库/日志/临时文件留缝
 DISK_SAFETY_GB = float(os.getenv("DISK_SAFETY_GB", "0.5"))
+# 估算的时长封顶（小时）。合集/多P 场景 B站 API 会把整季时长当成本集（实测出现过 1752 分钟），
+# 不封顶会让预检按 29 小时算出 30GB 需求，把本来能跑的任务拦在门外
+DISK_ESTIMATE_MAX_HOURS = float(os.getenv("DISK_ESTIMATE_MAX_HOURS", "4"))
 
 # ---- 下载稳健性 ----
 # 单个流（音频/画面）的下载尝试次数（含首次）。B站 CDN 下大文件断流很常见，
