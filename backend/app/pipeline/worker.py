@@ -48,13 +48,18 @@ def _save_cache(bvid: str, cid, segments: list[dict]) -> None:
         pass
 
 
-def _cleanup(tid: int, keep_imgs: set[str] | None = None):
+def _cleanup(tid: int, keep_imgs: set[str] | None = None, keep_files: bool = False):
     """
-    任务完成后清理大文件：删下载的视频/音频。
+    任务结束后清理大文件：删下载的视频/音频。
     帧目录只删"没被笔记引用"的候选帧（f_*.jpg）和网格图（grid_*.jpg），
     保留下文字引用的 shot_*.jpg —— 否则网页上的截图会全部 404。
+
+    keep_files=True：任务失败但还有重试机会，什么都不删。
+    让下一次重试复用已下载的音频/视频和已抽好的候选帧，而不是从零再跑一遍。
     """
     if not config.CLEANUP_AFTER_DONE:
+        return
+    if keep_files:
         return
     work = config.DATA_DIR / f"task_{tid}"
     if work.exists():
@@ -85,6 +90,7 @@ def _run_one(task: dict):
     tid = task["id"]
     url = task["url"]
     used_imgs: set[str] = set()
+    keep_for_retry = False  # 失败但仍会重试时置 True：保留产物供下次复用
     try:
         def setp(status, progress, msg):
             db.update_task(tid, status=status, progress=progress, stage_message=msg)
@@ -127,7 +133,13 @@ def _run_one(task: dict):
                 model_size=asr_model,
             )
             if not segments:
-                raise RuntimeError("转写结果为空")
+                raise RuntimeError(
+                    "未识别到任何语音：可能是纯音乐/静音视频，或 VAD 误判。"
+                    "可试 WHISPER_LANG=auto，或换更大的 WHISPER_MODEL。")
+            if all(str(s.get("text", "")).startswith("[该段转写失败") for s in segments):
+                raise RuntimeError(
+                    "所有音频段都转写失败：多为内存不足（OOM）或音频损坏。"
+                    "建议调小 WHISPER_CHUNK_SEC、换 base 模型，或切 TRANSCRIBE_PROVIDER=cloud。")
             if bvid:
                 _save_cache(bvid, p_cid, segments)
 
@@ -190,6 +202,7 @@ def _run_one(task: dict):
         if not no_retry and retry_count < config.MAX_RETRY:
             # 未超上限：设 not_before 让 worker 到点再取（不阻塞循环、不立即空转重试）
             wait = config.RETRY_BACKOFF_SEC * (2 ** retry_count)
+            keep_for_retry = True  # 下一轮 download() 会复用已下载文件，转写/视觉也有缓存
             db.update_task(tid, status=db.QUEUED,
                            stage_message=f"失败，{wait}s 后自动重试（{retry_count+1}/{config.MAX_RETRY}）：{str(e)[:80]}",
                            error=f"{e}\n\n{tb[-1200:]}",
@@ -201,10 +214,10 @@ def _run_one(task: dict):
             db.update_task(tid, status=db.FAILED, stage_message=stage,
                            error=f"{e}\n\n{tb[-1500:]}")
     finally:
-        # 无论成功失败都清理大文件，防止磁盘被撑爆（2核4G 关键）
-        # 只保留笔记正文引用到的截图，候选帧与网格图删掉
+        # 成功/最终失败都清理大文件，防止磁盘被撑爆（2核4G 关键）
+        # 只有"失败且还会重试"时保留，让下一轮跳过下载与转写
         try:
-            _cleanup(tid, keep_imgs=used_imgs)
+            _cleanup(tid, keep_imgs=used_imgs, keep_files=keep_for_retry)
         except Exception:
             pass
 

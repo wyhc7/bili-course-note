@@ -90,6 +90,9 @@ python -m uvicorn backend.app.main:app --host 0.0.0.0 --port 8000
 | `CLEANUP_AFTER_DONE` | 完成后删临时文件，**务必 true** |
 | `DISK_CHECK_ENABLED` | 下载前磁盘预检，默认 `true`；空间不足直接失败且不重试 |
 | `DISK_MIN_FREE_GB` / `DISK_GB_PER_HOUR` | 预检下限 1GB / 按时长估算 1GB 每小时（720p 实测约 0.8GB/h） |
+| `DOWNLOAD_ATTEMPTS` | 单个音视频流下载尝试次数，默认 3；断了从断点续传（Range），不重下整个文件 |
+| `RESUME_ON_RETRY` | 失败重试时复用已下载的音视频，默认 `true`；把重试成本从"重下+重转"降到"只重跑总结" |
+| `LLM_RETRY_ATTEMPTS` | 文本 LLM 调用重试次数，默认 3（2 小时课要调 8~9 次，不重试时一次抖动就废掉整个任务） |
 | `DENSE_FRAME_INTERVAL_SEC` | 密集抽帧间隔，默认 **10** 秒（越小候选越多，再靠感知哈希去重压回来） |
 | `FRAME_DEDUPE_DISTANCE` | 相邻帧感知哈希（dHash）距离阈值，默认 6；`0`=关闭去重 |
 | `SCREENSHOT_EVERY_SEC` | 目标截图密度，默认 120 秒/张（给 LLM 数量下限，控制一篇的截图数） |
@@ -159,3 +162,26 @@ backend/app/
 web/index.html     单页前端
 Dockerfile / docker-compose.yml / .env.example
 ```
+
+## 八、任务失败怎么排查
+
+先跑诊断，别猜：
+
+```bash
+python3 scripts/diagnose.py        # 默认看最近 200 条任务
+python3 scripts/diagnose.py 500    # 或者看更多
+```
+
+它会输出：失败率、按阶段归类的原因分布（磁盘 / B站接口 / 下载 / 转写 / LLM / 抽帧）、以及最近 8 条失败的原始错误。只读数据库，不改任何东西。
+
+常见原因与对应处理：
+
+| 归类 | 典型错误 | 处理 |
+|---|---|---|
+| B站接口/反爬 | `HTTP 412` / `playurl 未返回音频流` | 服务器 IP 被风控，配 `BILI_COOKIE` 或换网络；付费/受限视频本就下不了 |
+| 下载中断 | `peer reset` / `不完整` | 已自动断点续传（3 次），仍失败可调大 `DOWNLOAD_ATTEMPTS` |
+| 转写 | `所有音频段都转写失败` | 多为 OOM：调小 `WHISPER_CHUNK_SEC`、换 `base` 模型，或切云端 |
+| LLM 总结 | `429` / `timeout` | 已自动重试 3 次；仍失败多为额度或并发限制 |
+| 磁盘 | `磁盘空间不足` | 清 `data/` 旧任务；预检不会重试，必须手动腾空间 |
+
+> **重试不等于重跑。** 任务失败但还有重试次数时，`data/task_x/` 里的音视频会保留，下一轮 `download()` 直接复用（`RESUME_ON_RETRY`），转写和视觉也各有缓存。所以"LLM 偶尔抖一下"的代价从"重下 1.5GB + 重转 40 分钟"降到"重新总结一次"。

@@ -6,6 +6,7 @@ LLM 总结：转写文字 → 结构化 Markdown 笔记。
 同时支持多种笔记风格、章节标题带 *Content-[mm:ss] 时间戳、长视频分段合并。
 """
 import re
+import time
 
 from .. import config
 
@@ -45,24 +46,58 @@ def _out_tokens(system: str, user: str) -> int:
 
 
 def _chat(client, system: str, user: str, max_tokens: int | None = None) -> str:
-    # 该 LLM 端点强制返回 SSE 流式，必须用 stream=True 收 delta 再拼接
-    resp = client.chat.completions.create(
-        model=config.LLM_MODEL,
-        messages=[{"role": "system", "content": system},
-                  {"role": "user", "content": user}],
-        temperature=0.3,
-        max_tokens=max_tokens or _out_tokens(system, user),
-        stream=True,
-    )
-    parts = []
-    for chunk in resp:
+    """
+    调 LLM 收流式输出，带重试。
+
+    为什么必须重试：2 小时课要分段调 8 次 + 合并 1 次，旧实现一次超时/429/断流
+    就让整个任务失败，而且失败后还要从零重下视频。单次抖动 3% 累积到 9 次约 24%。
+
+    最后一次仍失败时，若已收到足够内容（LLM_PARTIAL_MIN_CHARS），接受这份半成品
+    并在文末标注 —— 比整篇笔记丢掉强，也避免用户以为生成完整。
+    """
+    attempts = max(1, config.LLM_RETRY_ATTEMPTS)
+    best = ""
+    last: Exception | None = None
+
+    for i in range(attempts):
+        parts: list[str] = []
         try:
-            delta = chunk.choices[0].delta
-            if getattr(delta, "content", None):
-                parts.append(delta.content)
-        except (IndexError, AttributeError):
-            continue
-    return "".join(parts).strip()
+            # 该 LLM 端点强制返回 SSE 流式，必须用 stream=True 收 delta 再拼接
+            resp = client.chat.completions.create(
+                model=config.LLM_MODEL,
+                messages=[{"role": "system", "content": system},
+                          {"role": "user", "content": user}],
+                temperature=0.3,
+                max_tokens=max_tokens or _out_tokens(system, user),
+                stream=True,
+            )
+            for chunk in resp:
+                try:
+                    delta = chunk.choices[0].delta
+                    if getattr(delta, "content", None):
+                        parts.append(delta.content)
+                except (IndexError, AttributeError):
+                    continue
+            text = "".join(parts).strip()
+            if text:
+                return text
+            raise SummaryError("LLM 返回空内容")
+        except Exception as e:
+            last = e
+            got = "".join(parts).strip()
+            if len(got) > len(best):
+                best = got  # 断流前收到的内容，留作兜底
+            if i + 1 >= attempts:
+                break
+            wait = config.LLM_RETRY_BACKOFF_SEC * (2 ** i)
+            time.sleep(max(0.0, wait))
+
+    if len(best) >= max(1, config.LLM_PARTIAL_MIN_CHARS):
+        return (best.rstrip()
+                + "\n\n> ⚠️ 本次生成因网络/接口中断提前结束，"
+                  "以上为已生成部分。可点「重跑」重新生成完整笔记。")
+
+    raise SummaryError(f"LLM 调用失败（已尝试 {attempts} 次）：{last}")
 
 
 def _chunk_text(text: str, limit: int) -> list[str]:

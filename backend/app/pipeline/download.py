@@ -107,17 +107,54 @@ def _pick_video(videos: list, max_height: int) -> dict | None:
 
 
 def _download_stream(client, url: str, out: Path, referer: str, progress_cb=None, tag=""):
-    with client.stream("GET", url, headers=_headers(referer), timeout=600) as r:
-        r.raise_for_status()
-        total = int(r.headers.get("content-length", 0))
-        done = 0
-        with open(out, "wb") as f:
-            for chunk in r.iter_bytes(chunk_size=1 << 16):
-                f.write(chunk)
-                done += len(chunk)
-                if progress_cb and total:
-                    pct = int(done / total * 100)
-                    progress_cb(f"下载{tag} {pct}%")
+    """
+    分段下载 + 断点续传 + 完整性校验。
+
+    B站 CDN 下 1.5GB 大文件断流很常见，旧实现一断就抛 DownloadError，
+    导致整个任务重试（还要从 view API 重新走一遍）。这里改成：
+      - 已下载的字节数作为 Range 起点续传（CDN 支持 206 时追加写）
+      - 服务器不支持 Range（回 200）时自动退回覆盖写，结果依然正确
+      - 收尾比对 Content-Length，短了算失败并重试，绝不让半截文件流到 ffmpeg
+    """
+    attempts = max(1, config.DOWNLOAD_ATTEMPTS)
+    last: Exception | None = None
+
+    for i in range(attempts):
+        have = out.stat().st_size if out.exists() else 0
+        headers = _headers(referer)
+        if have > 0:
+            headers["Range"] = f"bytes={have}-"
+        try:
+            with client.stream("GET", url, headers=headers, timeout=600) as r:
+                if r.status_code == 416:
+                    return  # 服务端认为已经给全了
+                r.raise_for_status()
+                if r.status_code == 206:
+                    total = int(r.headers.get("content-length", 0)) + have
+                    mode, done = "ab", have
+                else:
+                    total = int(r.headers.get("content-length", 0))
+                    mode, done = "wb", 0
+                with open(out, mode) as f:
+                    for chunk in r.iter_bytes(chunk_size=1 << 16):
+                        f.write(chunk)
+                        done += len(chunk)
+                        if progress_cb and total:
+                            progress_cb(f"下载{tag} {int(done / total * 100)}%")
+            got = out.stat().st_size if out.exists() else 0
+            if total and got < total:
+                raise DownloadError(f"{tag}流不完整：{got}/{total} 字节")
+            return
+        except Exception as e:
+            last = e
+            if i + 1 >= attempts:
+                break
+            wait = config.DOWNLOAD_RETRY_BACKOFF_SEC * (2 ** i)
+            if progress_cb:
+                got_mb = (out.stat().st_size if out.exists() else 0) / 1e6
+                progress_cb(f"下载{tag}中断（已存 {got_mb:.0f}MB），{wait:.0f}s 后从断点续传…")
+            time.sleep(wait)
+    raise DownloadError(f"下载{tag}失败（已尝试 {attempts} 次）：{last}")
 
 
 def list_pages(url: str) -> dict:
@@ -186,6 +223,36 @@ def _check_disk(duration_sec: float):
     )
 
 
+def _load_reusable(work: Path, bvid: str) -> dict | None:
+    """
+    断点续跑：上一次失败后保留了 task 目录，这里直接复用，避免重下 1.5GB + 重转 wav。
+    只在 audio.wav 完好、bvid 一致、且（需要抽帧时）视频文件也在的情况下命中。
+    """
+    if not config.RESUME_ON_RETRY:
+        return None
+    mf, aw = work / "meta.json", work / "audio.wav"
+    if not (mf.exists() and aw.exists()) or aw.stat().st_size < 10240:
+        return None
+    try:
+        meta = json.loads(mf.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    if meta.get("bvid") != bvid:
+        return None
+    vp = meta.get("video_path")
+    video_path = vp if (vp and Path(vp).exists()) else None
+    # 需要抽帧但画面流丢了：不复用，让它重下，否则这篇会没有截图
+    if config.EXTRACT_FRAMES_NEED_VIDEO and not video_path:
+        return None
+    return {
+        "audio_path": str(aw),
+        "video_path": video_path,
+        "title": meta.get("title") or bvid,
+        "duration_sec": float(meta.get("duration_sec") or 0),
+        "bvid": bvid,
+    }
+
+
 def download(url: str, task_id: int, progress_cb=None,
              page_cid: int | None = None, page_title: str | None = None) -> dict:
     """
@@ -199,6 +266,13 @@ def download(url: str, task_id: int, progress_cb=None,
 
     work = config.DATA_DIR / f"task_{task_id}"
     work.mkdir(parents=True, exist_ok=True)
+
+    # 断点续跑：失败重试时复用上次已下载的音频/视频，不重复走 API 和下载
+    reused = _load_reusable(work, bvid)
+    if reused:
+        if progress_cb:
+            progress_cb("复用上次已下载的文件，跳过下载")
+        return reused
 
     with httpx.Client(timeout=30, follow_redirects=True) as client:
         if progress_cb:
@@ -308,13 +382,20 @@ def download(url: str, task_id: int, progress_cb=None,
     if real_dur and real_dur > 0:
         duration = real_dur
 
-    return {
+    result = {
         "audio_path": str(audio_wav),
         "video_path": str(final_video) if final_video else None,
         "title": title,
         "duration_sec": duration,
         "bvid": bvid,
     }
+    # 落一份元数据，供失败重试时断点续跑（见 _load_reusable）
+    try:
+        (work / "meta.json").write_text(
+            json.dumps(result, ensure_ascii=False), encoding="utf-8")
+    except Exception:
+        pass
+    return result
 
 
 def _probe_duration(path) -> float:

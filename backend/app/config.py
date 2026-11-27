@@ -118,6 +118,12 @@ LLM_MODEL = os.getenv("LLM_MODEL", "deepseek-chat")
 LLM_MAX_CHARS = int(os.getenv("LLM_MAX_CHARS", "48000"))  # 单次喂给 LLM 的上限
 # 单次输出上限（token）。实际取 min(本值, 按输入体量估算)，避免长课笔记被腰斩
 LLM_MAX_OUTPUT_TOKENS = int(os.getenv("LLM_MAX_OUTPUT_TOKENS", "8000"))
+# 文本 LLM 调用重试次数（含首次）。2 小时课要调 8~9 次，不重试时单次抖动就能废掉整个任务
+LLM_RETRY_ATTEMPTS = int(os.getenv("LLM_RETRY_ATTEMPTS", "3"))
+# 重试前的退避基数（秒），按 2 的幂递增：2s / 4s
+LLM_RETRY_BACKOFF_SEC = float(os.getenv("LLM_RETRY_BACKOFF_SEC", "2"))
+# 全部重试都失败时，若已收到这么多字符，就接受这份"半截结果"并在文末标注，而不是让任务彻底失败
+LLM_PARTIAL_MIN_CHARS = int(os.getenv("LLM_PARTIAL_MIN_CHARS", "400"))
 
 # 笔记风格: 网课/学术/口语/重点
 NOTE_STYLE = os.getenv("NOTE_STYLE", "网课")
@@ -137,6 +143,15 @@ DISK_MIN_FREE_GB = float(os.getenv("DISK_MIN_FREE_GB", "1.0"))
 DISK_GB_PER_HOUR = float(os.getenv("DISK_GB_PER_HOUR", "1.0"))
 # 估算之外再留的余量（GB）：给数据库/日志/临时文件留缝
 DISK_SAFETY_GB = float(os.getenv("DISK_SAFETY_GB", "0.5"))
+
+# ---- 下载稳健性 ----
+# 单个流（音频/画面）的下载尝试次数（含首次）。B站 CDN 下大文件断流很常见，
+# 断了会从已下载字节处续传（Range），不会把 1.5GB 重下一遍
+DOWNLOAD_ATTEMPTS = int(os.getenv("DOWNLOAD_ATTEMPTS", "3"))
+# 断流后重试前的等待（秒），按 2 的幂递增
+DOWNLOAD_RETRY_BACKOFF_SEC = float(os.getenv("DOWNLOAD_RETRY_BACKOFF_SEC", "1.5"))
+# 任务失败后保留已下载的视频/音频，供下一次重试复用（成功或最终失败时仍会清理）
+RESUME_ON_RETRY = os.getenv("RESUME_ON_RETRY", "true").lower() == "true"
 
 # ---- 磁盘清理（2核4G 关键，跑多了不清理会爆盘）----
 CLEANUP_AFTER_DONE = os.getenv("CLEANUP_AFTER_DONE", "true").lower() == "true"
