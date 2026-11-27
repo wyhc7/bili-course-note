@@ -2,6 +2,7 @@
 FastAPI 应用：提交任务、查进度、看/下载 Markdown、托管单页前端。
 """
 from contextlib import asynccontextmanager
+from functools import lru_cache
 from pathlib import Path
 import uuid
 import io
@@ -29,6 +30,8 @@ app = FastAPI(title="B站视频内容提取", lifespan=lifespan)
 
 # 关键帧截图静态目录：/frames/<task_x>/xxx.jpg
 app.mount("/frames", StaticFiles(directory=str(config.FRAMES_DIR)), name="frames")
+# 前端静态资源（KaTeX 等本地依赖）：/static/vendor/katex/katex.min.js
+app.mount("/static", StaticFiles(directory=str(config.WEB_DIR)), name="static")
 
 
 class SubmitReq(BaseModel):
@@ -362,13 +365,59 @@ def _collect_images(md_text: str):
     return img_map
 
 
+@lru_cache(maxsize=1)
+def _katex_assets() -> tuple[str, str]:
+    """
+    返回 (css, js)，css 里的字体已内联成 data URI，可以直接塞进单文件 HTML。
+
+    只有笔记里真的出现公式时才会被拼进去，所以无公式的笔记体积完全不受影响。
+    """
+    import base64
+
+    d = config.WEB_DIR / "vendor" / "katex"
+    css_path, js_path = d / "katex.min.css", d / "katex.min.js"
+    if not css_path.exists() or not js_path.exists():
+        return "", ""
+
+    css = css_path.read_text(encoding="utf-8")
+    # 只保留 woff2：woff/ttf 是同一字体的兜底，全内联会让体积翻三倍
+    css = re.sub(r',url\(fonts/[^)]+\.(?:woff|ttf)\)\s*format\("(?:woff|truetype)"\)', "", css)
+
+    def _inline_font(m):
+        f = d / "fonts" / m.group(1)
+        if not f.exists():
+            return m.group(0)
+        b64 = base64.b64encode(f.read_bytes()).decode()
+        return f'url(data:font/woff2;base64,{b64}) format("woff2")'
+
+    css = re.sub(r'url\(fonts/([^)]+\.woff2)\)\s*format\("woff2"\)', _inline_font, css)
+    js = js_path.read_text(encoding="utf-8").replace("</script", "<\\/script")
+    return css, js
+
+
 def _md_to_html(md_text: str, link_rewrite=None) -> str:
     """
-    极简 Markdown -> 单文件 HTML，图片用 base64 内嵌（完全自包含，双击即可离线看，无需 Markdown 软件）。
-    覆盖本项目笔记会用到的语法：# / ## / ### 标题、列表、**粗体**、`code`、> 引用、表格、图片、LaTeX 原样保留。
+    极简 Markdown -> 单文件 HTML，图片与 KaTeX 都内嵌（完全自包含，双击即可离线看）。
+    覆盖：# / ## / ### 标题、列表、**粗体**、`code`、> 引用、表格、图片、$...$ / $$...$$ 公式。
     """
     import base64
     import html as _html
+
+    # 公式必须最先抽成占位：块级 $$...$$ 常常跨行，一旦先按行切分就会被拆散；
+    # 行内 $...$ 也会被后面的 escape / 粗体 / 链接正则改坏。
+    maths: list[tuple[bool, str]] = []
+
+    def _stash_math(m, display: bool):
+        maths.append((display, m.group(1)))
+        return f"\x00MATH{len(maths) - 1}\x00"
+
+    text = re.sub(r"\$\$([\s\S]+?)\$\$", lambda m: _stash_math(m, True), md_text)
+    text = re.sub(r"\$([^\n$]{1,500}?)\$", lambda m: _stash_math(m, False), text)
+
+    def _math_span(item) -> str:
+        display, tex = item
+        return ('<span class="math" data-display="%d" data-tex="%s"></span>'
+                % (1 if display else 0, _html.escape(tex.strip(), quote=True)))
 
     def _img_tag(m):
         alt, web = m.group(1), m.group(2)
@@ -381,12 +430,12 @@ def _md_to_html(md_text: str, link_rewrite=None) -> str:
                 pass
         return f'<img alt="{_html.escape(alt)}" src="{_html.escape(web)}" />'
 
-    # 先替换图片为占位，避免后续转义破坏
+    # 再替换图片为占位，避免后续转义破坏
     imgs = []
     def _stash(m):
         imgs.append(_img_tag(m))
         return f"\x00IMG{len(imgs)-1}\x00"
-    text = _IMG_RE.sub(_stash, md_text)
+    text = _IMG_RE.sub(_stash, text)
 
     lines = text.split("\n")
     out, in_ul, in_ol, in_table = [], False, False, False
@@ -395,6 +444,8 @@ def _md_to_html(md_text: str, link_rewrite=None) -> str:
 
     def _inline(s):
         s = _html.escape(s)
+        # 清掉可能残留的截图标记（正常流程里已被替换成图片，这里是兜底）
+        s = re.sub(r"\*{0,2}Screenshot-\s*\[[^\]]{0,24}\]\*{0,2}", "", s)
         s = re.sub(r"\*\*(.+?)\*\*", r"<strong>\1</strong>", s)
         s = re.sub(r"`([^`]+)`", r"<code>\1</code>", s)
         if link_rewrite:
@@ -406,16 +457,20 @@ def _md_to_html(md_text: str, link_rewrite=None) -> str:
             s = re.sub(r"\[([^\]]+)\]\(([^)]+)\)", r'<a href="\2">\1</a>', s)
         # 还原图片占位（图片已是 HTML，不能再被转义）
         s = re.sub(r"\x00IMG(\d+)\x00", lambda m: imgs[int(m.group(1))], s)
+        # 还原公式占位（同理，KaTeX 在浏览器里按 data-tex 渲染）
+        s = re.sub(r"\x00MATH(\d+)\x00", lambda m: _math_span(maths[int(m.group(1))]), s)
         return s
 
     def _heading(level: int, text_): 
         """生成带锚点的标题，并登记到 toc（去掉 *Content-[mm:ss] 标记用于目录显示）。"""
         hidx[0] += 1
         anchor = f"h{hidx[0]}"
-        clean = re.sub(r"\*?Content-\s*\[?\d{1,2}:\d{2}\]?\*?", "", text_).strip()
+        # 标题里的章节时间戳只作元数据，正文标题要清掉（支持 hh:mm:ss）
+        clean = re.sub(
+            r"\*{0,2}Content-\s*\[?\d{1,2}:\d{2}(?::\d{2})?\]?\*{0,2}", "", text_).strip()
         if level == 2:      # 只把二级标题放进目录（网课章节层级刚好）
             toc.append((level, anchor, clean))
-        return f'<h{level} id="{anchor}">{_inline(text_)}</h{level}>'
+        return f'<h{level} id="{anchor}">{_inline(clean)}</h{level}>'
 
     def _close():
         nonlocal in_ul, in_ol, in_table
@@ -425,8 +480,10 @@ def _md_to_html(md_text: str, link_rewrite=None) -> str:
 
     for raw in lines:
         line = raw.rstrip()
-        # 图片占位单独成行
+        # 图片 / 块级公式占位单独成行
         if re.fullmatch(r"\x00IMG\d+\x00", line.strip()):
+            _close(); out.append(_inline(line.strip())); continue
+        if re.fullmatch(r"\x00MATH\d+\x00", line.strip()):
             _close(); out.append(_inline(line.strip())); continue
         if not line.strip():
             _close(); continue
@@ -464,6 +521,25 @@ def _md_to_html(md_text: str, link_rewrite=None) -> str:
             '<details class="toc" open><summary>📑 目录（点击跳转）</summary>'
             f'<ol>{items}</ol></details>')
 
+    # 只有真的出现公式时才注入 KaTeX（CSS 里字体已 base64，单篇约 +1MB），
+    # 无公式的笔记体积不受影响。
+    katex_css = katex_js = katex_boot = ""
+    if maths:
+        katex_css, katex_js = _katex_assets()
+        if katex_js:
+            katex_boot = (
+                "<script>" + katex_js + "</script>"
+                "<script>(function(){var els=document.querySelectorAll('.math[data-tex]');"
+                "for(var i=0;i<els.length;i++){var el=els[i];"
+                "try{katex.render(el.getAttribute('data-tex'),el,{displayMode:"
+                "el.getAttribute('data-display')==='1',throwOnError:false,strict:'ignore'});}"
+                "catch(e){el.textContent='$$'+el.getAttribute('data-tex')+'$$';}}})();</script>")
+        else:
+            # KaTeX 资源缺失：至少把公式原文显示出来，不丢内容
+            katex_boot = (
+                "<script>document.querySelectorAll('.math[data-tex]').forEach(function(el){"
+                "el.textContent='$$'+el.getAttribute('data-tex')+'$$';});</script>")
+
     return (
         "<!doctype html><html lang='zh-CN'><head><meta charset='utf-8'>"
         "<meta name='viewport' content='width=device-width,initial-scale=1'>"
@@ -482,7 +558,11 @@ def _md_to_html(md_text: str, link_rewrite=None) -> str:
         ".toc{background:#f7f9fc;border:1px solid #e3e9f2;border-radius:8px;padding:10px 14px;margin:14px 0}"
         ".toc summary{cursor:pointer;font-weight:600;color:#2b5dbf}"
         ".toc ol{margin:8px 0 0;font-size:.95em}.toc a{color:#2b5dbf;text-decoration:none}"
-        "</style></head><body>" + toc_html + body + "</body></html>"
+        ".katex-display{margin:12px 0;padding:2px 0;overflow-x:auto;overflow-y:hidden}"
+        ".math{white-space:pre-wrap}"
+        "</style>"
+        + (f"<style>{katex_css}</style>" if katex_css else "")
+        + "</head><body>" + toc_html + body + katex_boot + "</body></html>"
     )
 
 

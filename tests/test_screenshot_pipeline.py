@@ -81,7 +81,7 @@ assert summarize._chunk_span("[00:00] 开场\n[03:20] 定理\n[07:45] 例题") =
 assert summarize._chunk_span("[01:02:05] 长视频") == (3725, 3725)
 vision = [{"ts": t, "desc": f"画面{t}", "img_url": f"/frames/task_1/f_{t}.jpg"}
           for t in (0, 30, 300, 600)]
-assert summarize._vlines(vision, -30, 230) == ["- 00:00：画面0", "- 00:30：画面30"]
+assert summarize._vlines(vision, -30, 230) == ["- S1　00:00：画面0", "- S2　00:30：画面30"]
 assert summarize._vlines([{"ts": 5, "desc": "[网格视觉失败: x]", "img_url": "/x"}]) == []
 
 # --------------------------------------------- 4. 超 1 小时的时间戳（P0）
@@ -206,7 +206,55 @@ class Flaky:
 c = Flaky(fail_times=2)
 assert frames._vision_chat(c, "m", "t", "b64") == "好的" and c.n == 3
 
-# ------------------------------------------------- 9. 真实视频抽帧（可选）
+# --------------------------------- 9. 图文对应：编号引用 / 时间倒序 / 错位解析
+case("图文对应：编号直取候选；时间倒序不再丢图；网格不错位")
+vis3 = [{"ts": t, "desc": f"第{i}页", "img_url": f"/frames/task_9/{n}"}
+        for i, (t, n) in enumerate(
+            [(60, "f_00001.jpg"), (600, "f_00003.jpg"), (1800, "f_00005.jpg")], 1)]
+
+# 时间倒序（合并后章节回顾引用早期画面）：旧实现 `ts - last < gap` 会把后两个全删
+d1 = "A *Screenshot-[30:00]\n\nB *Screenshot-[01:00]\n\nC *Screenshot-[10:00]\n"
+o1, _ = summarize.fill_screenshots(d1, "/none.mp4", 9, vision=vis3)
+assert o1.count("![") == 3, o1
+
+# 编号引用：直接锁定那一条候选，不做任何时间吸附
+d2 = "讲行列式 *Screenshot-[S3]\n\n讲例题 *Screenshot-[S2]\n"
+o2, _ = summarize.fill_screenshots(d2, "/none.mp4", 9, vision=vis3)
+assert "/frames/task_9/f_00005.jpg" in o2 and "/frames/task_9/f_00003.jpg" in o2
+
+# 幻觉编号删标记、同一编号只插一次
+d3 = "*Screenshot-[S99]\n\n*Screenshot-[S1]\n\n*Screenshot-[S1]\n"
+o3, _ = summarize.fill_screenshots(d3, "/none.mp4", 9, vision=vis3)
+assert o3.count("![") == 1 and "Screenshot" not in o3, o3
+
+# 加粗/多余星号包裹也要认，且不残留星号
+o4, _ = summarize.fill_screenshots("**Screenshot-[S2]**\n", "/none.mp4", 9, vision=vis3)
+assert o4.count("![") == 1 and "*" not in o4, o4
+
+# 标题行里的标记被挪到下一行，避免"标题配图"
+o5 = summarize._HEADING_MARK_RE.sub(r"\1\n\n\2", "## 一、定义 *Screenshot-[S1]\n")
+assert o5.splitlines()[0] == "## 一、定义", o5
+
+# 网格：h:mm:ss 解析正确；缺序号且行数不匹配时宁可不给，也不能整体错一格
+assert frames._parse_grid_reply("1:15:30 板书推导", [4530]) == {4530: "板书推导"}
+assert frames._parse_grid_reply("好的，下面逐格：\n1. A\n2. B\n3. C", [0, 10, 20]) == {}
+
+# ------------------------------------------- 10. 补洞（与远端 8c393b0 的融合）
+case("补洞：相邻截图空档过大时从候选帧补图，关闭时不补")
+vis4 = [{"ts": t, "desc": f"p{t}", "img_url": f"/frames/task_9/g_{t:05d}.jpg"}
+        for t in (0, 100, 200, 300)]
+d6 = "# t\n\n*Screenshot-[00:00]\n\n*Screenshot-[05:00]\n"
+_old_gap = config.SCREENSHOT_MAX_GAP_SEC
+config.SCREENSHOT_MAX_GAP_SEC = 120
+o6, _ = summarize.fill_screenshots(d6, "/none.mp4", 9, vision=vis4)
+print(f"   开补洞(120s)：{o6.count('![')} 张")
+assert o6.count("![") == 4, o6          # 0 → 100 → 200 → 300
+config.SCREENSHOT_MAX_GAP_SEC = 0
+o7, _ = summarize.fill_screenshots(d6, "/none.mp4", 9, vision=vis4)
+assert o7.count("![") == 2, o7          # 关闭补洞只剩两个锚点
+config.SCREENSHOT_MAX_GAP_SEC = _old_gap
+
+# ------------------------------------------------- 11. 真实视频抽帧（可选）
 case("真实视频：静止段去重、换页帧保留")
 if shutil.which("ffmpeg"):
     vid = TMP / "t.mp4"

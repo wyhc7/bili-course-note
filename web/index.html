@@ -83,6 +83,13 @@
   #modalBody .quote{display:block;color:var(--muted);border-left:3px solid var(--border);padding-left:10px;margin:4px 0}
   #modalBody code{background:#0d0f13;padding:1px 5px;border-radius:4px;font-size:12px}
   #modalBody pre.code{background:#0d0f13;padding:12px;border-radius:8px;font-size:12px;overflow:auto}
+  /* KaTeX：默认是黑字，深色主题下几乎看不见，必须跟随正文色 */
+  #modalBody .katex{color:var(--fg);font-size:1.02em}
+  #modalBody .katex-display{margin:12px 0;padding:2px 0;overflow-x:auto;overflow-y:hidden}
+  #modalBody code.math-raw{color:var(--warn);white-space:pre-wrap}
+  #modalBody .katex .mord.text{color:var(--fg)}
+  #modalBody ul,#modalBody ol{margin:8px 0;padding-left:22px}
+  #modalBody li{margin:4px 0}
   #modalBody table.md-table{border-collapse:collapse;width:100%;margin:12px 0;font-size:13px}
   #modalBody table.md-table th,#modalBody table.md-table td{border:1px solid var(--border);padding:7px 10px;text-align:left}
   #modalBody table.md-table th{background:#1d2129;font-weight:600}
@@ -91,6 +98,9 @@
     padding:1px 7px;border-radius:5px;margin-left:6px;vertical-align:middle;font-family:ui-monospace,Consolas,monospace}
   .hint{font-size:12px;color:var(--muted);margin-top:10px}
 </style>
+<!-- KaTeX 本地打包：离线也能渲染 $...$ / $$...$$ 公式 -->
+<link rel="stylesheet" href="/static/vendor/katex/katex.min.css">
+<script src="/static/vendor/katex/katex.min.js"></script>
 </head>
 <body>
 <header>
@@ -446,19 +456,50 @@ async function viewTask(id){
 }
 
 // 轻量 Markdown 渲染：转义后处理图片、标题、粗体、代码块、换行；够用不引库
+// 公式渲染：优先用本地打包的 KaTeX 同步出 HTML；没加载成功就退化成等宽原文，
+// 至少不会被后面的斜体/加粗规则当成强调符号吃掉内容
+function mathHtml(tex, display){
+  var t = String(tex||'').trim();
+  if(window.katex && t){
+    try{
+      return katex.renderToString(t, {displayMode: !!display, throwOnError:false, strict:'ignore'});
+    }catch(e){ /* 语法错误时走退化分支，不抛到页面上 */ }
+  }
+  var raw = (display?'$$':'$') + t + (display?'$$':'$');
+  return '<code class="math-raw">' + escapeHtml(raw) + '</code>';
+}
+
 function renderMarkdown(md){
-  let s = escapeHtml(md);
-  // 章节时间戳标记 *Content-[mm:ss] -> 徽章
-  s = s.replace(/\*?Content-\s*\[?(\d{1,2}:\d{2})\]?\*?/g, '<span class="ts-badge">▶ $1</span>');
-  // 残留截图标记兜底清掉
-  s = s.replace(/\*?Screenshot-\s*\[?\d{1,2}:\d{2}\]?\*?/g, '');
-  // 代码块
-  s = s.replace(/```([\s\S]*?)```/g, (m,c)=>'<pre class="code">'+c+'</pre>');
+  // 代码块与公式必须先抽成占位符：它们内部不能参与任何后续正则。
+  // 尤其是最后那句 \n -> <br> 会把 $$ 里 matrix/aligned 的换行打断，
+  // 斜体规则 /\*([^*\n]+)\*/ 也会把正文里的 $...$ 吞掉。
+  var slots = [];
+  var blocks = [];   // 该占位符是否为块级（代码块 / $$公式），块级前后不该再叠 <br>
+  function keep(html, block){ slots.push(html); blocks.push(!!block); return '\u0000K' + (slots.length-1) + '\u0000'; }
+
+  var src = String(md == null ? '' : md);
+  src = src.replace(/```[^\n]*\n?([\s\S]*?)```/g, function(m, code){
+    return keep('<pre class="code">' + escapeHtml(code.replace(/\s+$/,'')) + '</pre>', true);
+  });
+  // 块级公式 $$ ... $$（允许跨行，先于行内匹配）
+  src = src.replace(/\$\$([\s\S]+?)\$\$/g, function(m, tex){
+    return keep(mathHtml(tex, true), true);
+  });
+  // 行内公式 $...$：不跨行、前一个字符不能是 $ 或转义反斜杠
+  src = src.replace(/(^|[^\\$])\$([^\n$]{1,500}?)\$/g, function(m, pre, tex){
+    return pre + keep(mathHtml(tex, false), false);
+  });
+
+  var s = escapeHtml(src);
+  // 章节时间戳标记 *Content-[mm:ss] / [hh:mm:ss] -> 徽章
+  s = s.replace(/\*?Content-\s*\[?(\d{1,2}:\d{2}(?::\d{2})?)\]?\*?/g, '<span class="ts-badge">▶ $1</span>');
+  // 残留截图标记兜底清掉（编号或时间两种写法都清）
+  s = s.replace(/\*{0,2}Screenshot-\s*\[[^\]]{0,24}\]\*{0,2}/g, '');
   // 图片
   s = s.replace(/!\[([^\]]*)\]\(([^)]+)\)/g, (m,alt,url)=>'<img class="shot" src="'+url+'" alt="'+alt+'" loading="lazy">');
   // 普通链接 [text](url)（图片已处理完，剩下的都是文字链接）
   s = s.replace(/\[([^\]]+)\]\(([^)]+)\)/g, (m,text,url)=>'<a class="md-link" href="'+url+'">'+text+'</a>');
-  // 图片下的 “（mm:ss 画面）” 图注 -> em
+  // 图片下的 “（mm:ss 画面）” 图注 -> em（旧笔记兼容）
   s = s.replace(/^（(\d{1,2}:\d{2} 画面)）$/gm, '<em>（$1）</em>');
   // 标题
   s = s.replace(/^###### (.*)$/gm,'<h6>$1</h6>').replace(/^##### (.*)$/gm,'<h5>$1</h5>')
@@ -474,8 +515,20 @@ function renderMarkdown(md){
   s = s.replace(/`([^`]+)`/g,'<code>$1</code>');
   // 表格：处理连续的 | ... | 行块
   s = renderTables(s);
+  // 列表（必须在 \n -> <br> 之前按行识别）
+  s = s.replace(/^[ \t]*[-*][ \t]+(.+)$/gm, '<li>$1</li>');
+  s = s.replace(/^[ \t]*\d+[.)][ \t]+(.+)$/gm, '<li data-ol="1">$1</li>');
+  s = s.replace(/(?:<li(?: data-ol="1")?>[^\n]*<\/li>\n?)+/g, function(block){
+    var ol = /data-ol="1"/.test(block);
+    return (ol ? '<ol>' : '<ul>') + block.replace(/ data-ol="1"/g, '') + (ol ? '</ol>' : '</ul>');
+  });
   // 换行
   s = s.replace(/\n/g,'<br>');
+  // 块级占位符（代码块 / $$ 公式）本身就是块元素，前后多余的 <br> 会撑出大片空白
+  s = s.replace(/(?:<br>[ \t]*)+(?=\u0000K(\d+)\u0000)/g, function(m, i){ return blocks[+i] ? '' : m; });
+  s = s.replace(/\u0000K(\d+)\u0000(?:[ \t]*<br>)+/g, function(m, i){ return blocks[+i] ? '\u0000K' + i + '\u0000' : m; });
+  // 占位符还原（放在最后：公式/代码块不再被上面任何一条规则改写）
+  s = s.replace(/\u0000K(\d+)\u0000/g, function(m, i){ return slots[+i]; });
   return s;
 }
 

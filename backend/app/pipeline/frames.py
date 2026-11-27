@@ -162,9 +162,16 @@ def _vision_frame_budget(duration_sec: float) -> int:
     return max(base, min(cap, want))
 
 
-def _fmt_mmss(sec: float) -> str:
+def _fmt_stamp(sec: float) -> str:
+    """
+    网格烙印用：超 1 小时写 h:mm:ss，否则 mm:ss。
+
+    旧的 `{sec//60:02d}:{sec%60:02d}` 会把 1:15:30 写进 75:30，模型照抄回来时
+    正则按 mm:ss 解析成 4530 秒以外的值、或整条解析失败，描述就挂到错误时间上。
+    """
     sec = int(sec or 0)
-    return f"{sec // 60:02d}:{sec % 60:02d}"
+    h, m, s = sec // 3600, (sec % 3600) // 60, sec % 60
+    return f"{h}:{m:02d}:{s:02d}" if h else f"{m:02d}:{s:02d}"
 
 
 def _build_grid_image(cells: list[dict], out_path: str) -> None:
@@ -194,7 +201,7 @@ def _build_grid_image(cells: list[dict], out_path: str) -> None:
             continue
         x, y = (i % cols) * cw, (i // cols) * ch
         canvas.paste(img, (x, y))
-        label = f"#{i + 1} {_fmt_mmss(fr.get('ts', 0))}"
+        label = f"#{i + 1} {_fmt_stamp(fr.get('ts', 0))}"
         # 黑底 + 黄色字，保证任何画面上都清晰可读
         try:
             tb = draw.textbbox((0, 0), label, font=font)
@@ -397,15 +404,22 @@ def _vision_chat(client, model: str, text: str, b64: str, max_tokens: int = 300)
 
 
 _GRID_IDX_RE = re.compile(r"^#\s*(\d{1,2})\s*[.、:：,，]?\s*(.+)$")
-_GRID_TS_RE = re.compile(r"[【\[]?\s*(\d{1,3}):(\d{2})\s*[】\]]?\s*[:：]?\s*(.+)")
+_GRID_CAP_RE = re.compile(r"^第\s*(\d{1,2})\s*[格张]\s*[.、:：,，]?\s*(.+)$")
+# 时间前缀同时支持 mm:ss 与 h:mm:ss（超 1 小时的课，网格烙印就是 h:mm:ss）
+_GRID_TS_RE = re.compile(
+    r"[【\[]?\s*(\d{1,3}):(\d{2})(?::(\d{2}))?\s*[】\]]?\s*[:：]?\s*(.+)")
+_LT_TS_RE = re.compile(r"^(\d{1,3}:\d{2}(?::\d{2})?)\s*[）)】\]]?\s*")
 
 
 def _parse_grid_reply(text: str, ts_list: list[float]) -> dict[int, str]:
     """
     把模型逐行输出解析成 {秒: 描述}。三层容错：
-    1) `#n 描述`      —— 主路径（序号最不容易看错）
-    2) `mm:ss 描述`   —— 老格式
-    3) 无标记则按行顺序对齐
+    1) `#n 描述` / `第n格 描述`  —— 主路径（序号最不容易看错）
+    2) `mm:ss 描述` / `h:mm:ss 描述` —— 老格式，时间按 h*3600+m*60+s 解析
+    3) 无任何标记时，**只有行数与格数完全相等**才按顺序对齐
+
+    第 3 层以前是无条件 zip，模型多写一句"好的，下面逐格描述："就会整体错一格，
+    九格描述全部挂到相邻画面上 —— 错配比缺失更难发现，所以这里宁可不给。
     """
     out: dict[int, str] = {}
     if not text:
@@ -413,34 +427,38 @@ def _parse_grid_reply(text: str, ts_list: list[float]) -> dict[int, str]:
     valid = [int(t) for t in ts_list if t is not None]
 
     for line in text.splitlines():
-        line = line.strip().lstrip("-•·* ").strip()
-        m = _GRID_IDX_RE.match(line)
+        line = line.strip().lstrip("-•·*> ").strip()
+        m = _GRID_IDX_RE.match(line) or _GRID_CAP_RE.match(line)
         if not m:
             continue
         idx = int(m.group(1)) - 1
-        if 0 <= idx < len(valid):
-            desc = re.sub(r"^\d{1,3}:\d{2}\s*", "", m.group(2)).strip()
-            if desc:
-                out[valid[idx]] = desc
+        if not (0 <= idx < len(valid)):
+            continue
+        desc = _LT_TS_RE.sub("", m.group(2)).strip()
+        if desc:
+            out[valid[idx]] = desc
     if out:
         return out
 
     for line in text.splitlines():
-        line = line.strip().lstrip("-•·* ").strip()
+        line = line.strip().lstrip("-•·*> ").strip()
         if not line:
             continue
         m = _GRID_TS_RE.match(line)
-        if m:
-            sec = int(m.group(1)) * 60 + int(m.group(2))
-            desc = m.group(3).strip()
-            if desc:
-                out[sec] = desc
+        if not m:
+            continue
+        a, b, c = m.group(1), m.group(2), m.group(3)
+        sec = int(a) * 3600 + int(b) * 60 + int(c) if c else int(a) * 60 + int(b)
+        desc = m.group(4).strip()
+        if desc:
+            out[sec] = desc
     if out:
         return out
 
-    rows = [ln.strip().lstrip("-•·* ").strip() for ln in text.splitlines() if ln.strip()]
-    for sec, ln in zip(valid, rows):
-        out[sec] = ln
+    rows = [ln.strip().lstrip("-•·*#> ").strip() for ln in text.splitlines() if ln.strip()]
+    if len(rows) == len(valid) and rows:
+        for sec, ln in zip(valid, rows):
+            out[sec] = ln
     return out
 
 

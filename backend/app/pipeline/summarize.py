@@ -120,10 +120,16 @@ def _style_desc(style: str) -> str:
 
 
 def _vlines(vision: list[dict] | None, t0: int = 0, t1: int = 10 ** 9,
-            limit: int = 60) -> list[str]:
-    """候选画面清单（时间 + 描述），按时间窗过滤，视觉失败的占位直接丢掉。"""
+            limit: int = 80) -> list[str]:
+    """
+    候选画面清单（编号 S1..Sn + 时间 + 描述），按时间窗过滤，视觉失败的占位直接丢掉。
+
+    编号 = vision 原始下标 + 1，跨分段稳定。让模型引用编号而不是时间，是为了根治
+    "模型把时间写偏一位 → 吸附到隔壁那一页 → 图文对不上"：编号直接定位到那一帧，
+    中间不再有任何按秒数猜的环节。
+    """
     out = []
-    for v in (vision or []):
+    for i, v in enumerate(vision or []):
         if not v.get("img_url") or v.get("ts") is None:
             continue
         ts = int(v["ts"])
@@ -132,7 +138,7 @@ def _vlines(vision: list[dict] | None, t0: int = 0, t1: int = 10 ** 9,
         d = (v.get("desc") or "").strip()
         if not d or d.startswith("[") or d.startswith("("):
             continue
-        out.append(f"- {_fmt_ts(ts)}：{d[:70]}")
+        out.append(f"- S{i + 1}　{_fmt_ts(ts)}：{d[:90]}")
         if len(out) >= limit:
             break
     return out
@@ -161,11 +167,20 @@ def _build_rules(style: str, want_link: bool, want_screenshot: bool,
             "7) 【章节时间戳】每个二级标题(##)后，用 `*Content-[mm:ss]` 标注该章节开始的视频时间，"
             "例如 `## 一、缘起 *Content-[00:15]`。")
     if want_screenshot:
-        head = (
-            "8) 【截图占位 · 重要】这是一节网课，画面里的 PPT/板书/公式/图表/代码/推导步骤都很重要。"
-            "请在正文中**充分插入截图**：每当讲到一处新的板书/PPT 页/公式/图表/例题步骤时，"
-            "就在该处末尾插入截图占位标记 `*Screenshot-[mm:ss]`（mm:ss 是画面出现的视频时间）。"
-        )
+        if vlines:
+            head = (
+                "8) 【截图占位 · 重要】这是一节网课，画面里的 PPT/板书/公式/图表/代码/推导步骤都很重要。"
+                "请在正文中**充分插入截图**：讲到一处新的板书/PPT 页/公式/图表/例题步骤时，"
+                "就在描述该画面的那段文字末尾、**单独一行**插入 `*Screenshot-[S编号]`，"
+                "例如 `*Screenshot-[S7]`。编号只能从 8b) 的清单里原样照抄，**不要自己写时间**。"
+                "标记不要写进 `##` 标题行，也不要放在与该画面无关的段落里。"
+            )
+        else:
+            head = (
+                "8) 【截图占位 · 重要】这是一节网课，画面里的 PPT/板书/公式/图表/代码/推导步骤都很重要。"
+                "请在正文中**充分插入截图**：讲到一处新的板书/PPT 页/公式/图表/例题步骤时，"
+                "就在该处末尾、单独一行插入 `*Screenshot-[mm:ss]`（mm:ss 是画面出现的视频时间）。"
+            )
         if target:
             head += (f"本段时长约 {max(1, int(dur // 60))} 分钟，**至少插入 {target} 处截图**，"
                      "宁多勿少（同一页不要重复）。")
@@ -173,9 +188,9 @@ def _build_rules(style: str, want_link: bool, want_screenshot: bool,
         rules.append(head)
         if vlines:
             rules.append(
-                "8b) 【本段可用的画面时间点（带画面描述）】**只能**从下面这些时间点里挑，"
-                "不要自己编时间；优先选信息量最大的 PPT/板书/公式页，同一画面不要重复：\n"
-                + "\n".join(vlines))
+                "8b) 【本段可用画面（编号 + 时间 + 描述）】**只能**从下面这些编号里选，"
+                "编号原样照抄（S 后面是数字，不要改成别的编号）；优先选信息量最大的 PPT/板书/公式页，"
+                "同一个编号只引用一次：\n" + "\n".join(vlines))
     if want_toc:
         rules.append("9) 【目录】在正文开头根据 ## 标题生成一个标题目录。")
     if want_summary:
@@ -240,12 +255,15 @@ def summarize(segments: list[dict], vision: list[dict], meta: dict,
         if progress_cb:
             progress_cb("合并分段笔记…")
         merged = "\n\n---\n\n".join(partials)
+        # 合并阶段不给候选清单：既不让它新写时间标记（没有清单撑着，写出来只能靠吸附猜），
+        # 也不让它改写已有标记 —— 分段里已经是 `*Screenshot-[S12]`，原样搬过来即可。
         merge_rules = _build_rules(
-            style, want_link, want_screenshot, want_toc, want_summary, dur, None, None)
+            style, want_link, False, want_toc, want_summary, dur, None, None)
         merge_user = (
             f"视频标题：{title}\n\n下面是同一视频的多段笔记，请合并去重成一份完整笔记：\n"
             "- 只合并去重，不发明新内容；保持 Markdown 层级\n"
-            "- 保留所有 *Content-[mm:ss] 与 *Screenshot-[mm:ss] 标记\n"
+            "- **原样保留**所有 `*Content-[...]` 与 `*Screenshot-[...]` 标记，"
+            "不要新增标记、不要改编号、不要把标记挪到别的段落\n"
             f"- 遵循以下规则：\n{_system_prompt(merge_rules)}\n\n【分段笔记】\n{merged}"
         )
         body = _chat(client, _system_prompt(merge_rules), merge_user)
@@ -260,6 +278,9 @@ def summarize(segments: list[dict], vision: list[dict], meta: dict,
 
     # 规范化 Content 标记（去掉 LLM 常写的包裹星号，统一成 *Content-[mm:ss] / [hh:mm:ss]）
     doc = _CONTENT_RE.sub(_norm_content, doc)
+    # 模型常把截图标记塞在标题行末（`## 一、xxx *Screenshot-[S3]`），替换后会变成
+    # "标题配图"，看起来就是图与章节不对应。统一挪到标题的下一行。
+    doc = _HEADING_MARK_RE.sub(r"\1\n\n\2", doc)
 
     # 视觉描述：截图模式下图片已内嵌正文，不再在末尾重复堆一遍画面说明；
     # 仅在没开截图/没插入截图时，作为"关键画面说明"附在末尾供参考。
@@ -275,10 +296,22 @@ def summarize(segments: list[dict], vision: list[dict], meta: dict,
     return doc
 
 
-# ---- 两阶段截图：标记 -> 吸附/精确截帧 -> 替换 ----
-# 同时兼容 mm:ss 与 hh:mm:ss（超过 1 小时的课，模型会照抄转写里的 hh:mm:ss；
+# ---- 两阶段截图：标记 -> 定位到候选帧 -> 替换 ----
+# 标记有两种写法：
+#   *Screenshot-[S12]      —— 推荐。直接引用候选清单里的编号，画面与文字零误差
+#   *Screenshot-[mm:ss]    —— 兼容。没开视觉/老笔记只剩时间，走吸附兜底
+# 时间部分同时兼容 mm:ss 与 hh:mm:ss（超过 1 小时的课，模型会照抄转写里的 hh:mm:ss；
 # 旧正则只吃到 "01:02" 就把 62 分钟当成 62 秒，后半程截图会全部堆到开头）
-_SCREENSHOT_RE = re.compile(r"\*?Screenshot-\s*\[?(\d{1,3}):(\d{2})(?::(\d{2}))?\]?\*?")
+_SHOT_MARK = (
+    r"\*{0,2}[ \t]*Screenshot-[ \t]*\[?[ \t]*"
+    r"(?:S(?P<sid>\d{1,3})|(?P<a>\d{1,3}):(?P<b>\d{2})(?::(?P<c>\d{2}))?)"
+    r"[ \t]*\]?[ \t]*\*{0,2}"
+)
+_SCREENSHOT_RE = re.compile(_SHOT_MARK, re.IGNORECASE)
+# 标题行里夹带的标记：`## 一、缘起 *Screenshot-[S3]`
+_HEADING_MARK_RE = re.compile(
+    r"^([ \t]*#{1,6}[^\n]*?)[ \t]*(\*{0,2}[ \t]*Screenshot-[^\n]*?)[ \t]*$",
+    re.MULTILINE | re.IGNORECASE)
 _CONTENT_RE = re.compile(r"\*?Content-\s*\[?(\d{1,3}):(\d{2})(?::(\d{2}))?\]?\*?")
 
 
@@ -292,10 +325,16 @@ def _norm_content(m: re.Match) -> str:
 
 
 def extract_screenshot_marks(doc: str) -> list[tuple[str, int]]:
-    """返回 [(原始标记文本, 秒数), ...]"""
+    """返回 [(原始标记文本, 秒数), ...]。
+
+    编号标记（`*Screenshot-[S12]`）没有秒数概念，秒数位置返回 -1。
+    """
     out = []
     for m in _SCREENSHOT_RE.finditer(doc):
-        out.append((m.group(0), _groups_to_sec(m.groups())))
+        if m.group("sid"):
+            out.append((m.group(0), -1))
+            continue
+        out.append((m.group(0), _groups_to_sec((m.group("a"), m.group("b"), m.group("c")))))
     return out
 
 
@@ -327,112 +366,122 @@ def fill_screenshots(doc: str, video_path: str, task_id: int,
     """
     扫出所有 Screenshot 标记，替换成图片。返回 (新正文, 被引用的图片 URL 集合)。
 
-    处理顺序：
-      1) 标记吸附到最近候选帧（容差内），复用该帧文件；未覆盖才 ffmpeg 定点截帧
-      2) 相邻过近去重（MIN_GAP）+ 总量上限（MAX_SCREENSHOTS）
-      3) 补洞：相邻截图间隔 > SCREENSHOT_MAX_GAP_SEC 时，从候选帧里按中间点补一张，
-         保证"大段没图"不会发生（LLM 选点偏稀时兜底，确保有效密度）
+    定位优先级：
+      1) 编号标记 `*Screenshot-[S12]` —— 直接取第 12 条候选帧，不做任何时间换算，
+         图文必然对应；编号越界（模型幻觉）就删掉标记，不乱截
+      2) 时间标记 `*Screenshot-[mm:ss]` —— 吸附到容差内最近的候选帧，没覆盖才定点截帧
+
+    去重按"已插入帧的时间集合"判断，不依赖前一个标记的时间：分段合并后时间经常
+    不单调（章节回顾会引用早期画面），旧写法 `ts - last < gap` 在时间倒退时会把
+    后面所有标记误删成空。
+
+    补洞：两张相邻截图间隔超过 SCREENSHOT_MAX_GAP_SEC 时，从候选帧里按中间点补图，
+    避免大段无图（LLM 选点偏稀时兜底，保证有效密度）。
     """
-    marks = extract_screenshot_marks(doc)
-    if not marks:
+    if not _SCREENSHOT_RE.search(doc):
         return doc, set()
 
+    vision = vision or []
     cand = sorted(
-        [v for v in (vision or []) if v.get("img_url") and v.get("ts") is not None],
+        [v for v in vision if v.get("img_url") and v.get("ts") is not None],
         key=lambda v: int(v["ts"]),
     )
-
-    # 1) 吸附
-    plan: list[list] = []
-    for marker, sec in marks:
-        hit = _snap(cand, sec)
-        plan.append([marker, int(hit["ts"]) if hit else sec, hit])
-
-    # 2) 时间过近去重 + 总量上限
-    keep_idx, last = [], -10 ** 9
-    for i, item in enumerate(plan):
-        if item[1] - last < config.SCREENSHOT_MIN_GAP_SEC:
-            continue
-        keep_idx.append(i)
-        last = item[1]
-    keep_idx = keep_idx[: config.MAX_SCREENSHOTS]
-    keep_set = set(keep_idx)
+    total = len(_SCREENSHOT_RE.findall(doc))
 
     from . import frames as frames_mod
 
-    # 先算出"已保留"的秒数序列，用于补洞
-    kept_secs = sorted(plan[i][1] for i in keep_set)
-    used_ts = set(kept_secs)
-    # 3) 补洞：找超过 MAX_GAP 的空档，从候选帧取中间点补一张（挂在"前一张"截图后面）
-    gap_fill: dict[int, list[dict]] = {}   # 前一张截图秒数 -> [要补的候选帧 ...]
-    max_gap = config.SCREENSHOT_MAX_GAP_SEC
-    total_cap = config.MAX_SCREENSHOTS
-    if max_gap and max_gap > 0 and cand and kept_secs:
-        cand_by_ts = {int(c["ts"]): c for c in cand}
-        placed_n = len(kept_secs)
-        # 也考虑开头(0)和结尾(dur)之外的段内空档：只在已有截图之间补，避免全篇无标记时不补
-        prev = None
-        for s in kept_secs:
-            if prev is not None and (s - prev) > max_gap and placed_n < total_cap:
-                # 该空档内反复补，直到每段 <= max_gap
-                cursor = prev
-                while (s - cursor) > max_gap and placed_n < total_cap:
-                    target = cursor + max_gap
-                    # 找离 target 最近、且未被使用、且不太近已用点的候选
-                    best, bd = None, 10 ** 9
-                    for c in cand:
-                        ct = int(c["ts"])
-                        if ct in used_ts or not (cursor + config.SCREENSHOT_MIN_GAP_SEC <= ct <= s - config.SCREENSHOT_MIN_GAP_SEC):
-                            continue
-                        d = abs(ct - target)
-                        if d < bd:
-                            bd, best = d, c
-                    if not best:
-                        break
-                    gap_fill.setdefault(prev, []).append(best)
-                    used_ts.add(int(best["ts"]))
-                    cursor = int(best["ts"])
-                    placed_n += 1
-            prev = s
+    state: dict = {"done": 0, "times": [], "ids": set(), "cache": {}, "last": None}
+    max_gap = int(config.SCREENSHOT_MAX_GAP_SEC or 0)
+    min_gap = int(config.SCREENSHOT_MIN_GAP_SEC)
 
-    total = len(keep_set) + sum(len(v) for v in gap_fill.values())
-    done, cache = 0, {}
+    def _too_close(eff: int) -> bool:
+        return any(abs(eff - t) < min_gap for t in state["times"])
 
-    def _emit(sec: int, hit):
-        """生成一张截图的 markdown 块（命中候选帧则复用文件，否则定点截帧）。"""
-        nonlocal done
-        nonlocal cache
-        done += 1
-        if progress_cb:
-            progress_cb(f"生成截图 {done}/{total}（{_fmt_ts(sec)}）")
-        if hit:
-            url = hit["img_url"]
+    def _emit(sec: int, url: str, quiet: bool = False) -> str:
+        state["times"].append(sec)
+        state["done"] += 1
+        if progress_cb and not quiet:
+            progress_cb(f"生成截图 {state['done']}/{total}（{_fmt_ts(sec)}）")
+        # 图片独立成块。不追加"（xx 画面）"这类注释 —— 它写的是帧时间，
+        # 与正文表述稍有偏差就会让人觉得图配错了。
+        return f"\n\n![{_fmt_ts(sec)}]({url})\n\n"
+
+    def _fill_gap(a: int, b: int) -> str:
+        """a→b 间隔过大时，从候选帧里按 max_gap 步长补图（只补区间内、未被用过的帧）。"""
+        block = ""
+        if not max_gap or max_gap <= 0 or b - a <= max_gap:
+            return block
+        cursor = a
+        while b - cursor > max_gap and state["done"] < config.MAX_SCREENSHOTS:
+            target = cursor + max_gap
+            best, bd = None, 10 ** 9
+            for c in cand:
+                ct = int(c["ts"])
+                if ct in state["times"]:
+                    continue
+                if not (cursor + min_gap <= ct <= b - min_gap):
+                    continue
+                d = abs(ct - target)
+                if d < bd:
+                    bd, best = d, c
+            if not best:
+                break
+            block += _emit(int(best["ts"]), best["img_url"], quiet=True)
+            cursor = int(best["ts"])
+        return block
+
+    def _repl(m: re.Match) -> str:
+        if state["done"] >= config.MAX_SCREENSHOTS:
+            return ""
+
+        sid = m.group("sid")
+        if sid:
+            idx = int(sid) - 1
+            if not (0 <= idx < len(vision)):
+                return ""                        # 编号是幻觉，删标记而不是乱截
+            v = vision[idx]
+            if not v.get("img_url") or v.get("ts") is None:
+                return ""
+            key = f"S{int(sid)}"
+            if key in state["ids"]:
+                return ""                        # 同一编号重复引用
+            eff = int(v["ts"])
+            if _too_close(eff):
+                return ""                        # 不同编号落到同一画面
+            state["ids"].add(key)
+            url = v["img_url"]
         else:
-            if sec not in cache:
-                cache[sec] = frames_mod.grab_frame_at(video_path, task_id, sec)
-            url = cache[sec]
-        return f"![{_fmt_ts(sec)}]({url})\n\n（{_fmt_ts(sec)} 画面）"
+            sec = _groups_to_sec((m.group("a"), m.group("b"), m.group("c")))
+            hit = _snap(cand, sec)
+            eff = int(hit["ts"]) if hit else sec
+            if _too_close(eff):
+                return ""
+            if hit:
+                url = hit["img_url"]
+            else:
+                try:
+                    if eff not in state["cache"]:
+                        state["cache"][eff] = frames_mod.grab_frame_at(
+                            video_path, task_id, eff)
+                    url = state["cache"][eff]
+                except Exception:
+                    return ""
 
-    for i, (marker, eff, hit) in enumerate(plan):
-        if i not in keep_set:
-            doc = doc.replace(marker, "", 1)  # 跳过或超限：删掉标记，不破坏正文
-            continue
-        try:
-            block = _emit(eff, hit)
-            # 该截图之后要不要补洞
-            extra = gap_fill.get(eff)
-            if extra:
-                for c in extra:
-                    try:
-                        block += "\n\n" + _emit(int(c["ts"]), c)
-                    except Exception:
-                        pass
-            doc = doc.replace(marker, block, 1)
-        except Exception:
-            doc = doc.replace(marker, "", 1)
+        block = ""
+        if state["last"] is not None:
+            block = _fill_gap(state["last"], eff)
+        block += _emit(eff, url)
+        state["last"] = eff
+        return block
 
+    doc = _SCREENSHOT_RE.sub(_repl, doc)
+    # 删掉的标记会留下多余空行/行尾空格，收敛一下
+    doc = re.sub(r"[ \t]+\n", "\n", doc)
+    doc = re.sub(r"\n{3,}", "\n\n", doc)
     used = set(re.findall(r"!\[[^\]]*\]\((/frames/[^)]+)\)", doc))
     return doc, used
+
+
 
 
 def save_markdown(task_id: int, content: str) -> str:
